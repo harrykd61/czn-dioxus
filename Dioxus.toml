@@ -1,0 +1,23 @@
+[application]
+
+[bundle]
+identifier = "com.chzn.dioxus"
+publisher = "xCompany"
+name = "CZN Dioxus Signer"
+version = "1.0.0"
+copyright = "Copyright © 2025 xCompany. All rights reserved."
+
+[web.app]
+title = "CZN Dioxus - Electronic Signatures"
+short_name = "CZN Signer"
+start_url = "/"
+display = "standalone"
+background_color = "#1a202c"
+theme_color = "#2d3748"
+
+[web.resource]
+style = ["/assets/main.css", "/assets/tailwind.css"]
+script = []
+
+[web.resource.dev]
+script = []

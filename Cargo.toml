@@ -1,0 +1,38 @@
+[package]
+name = "czn-dioxus"
+version = "0.1.0"
+authors = ["d_in@rambler.ru <harrykd61>"]
+edition = "2021"
+description = "A Dioxus application for electronic signatures management"
+license = "MIT"
+repository = "https://github.com/yourusername/czn-dioxus"
+homepage = "https://github.com/yourusername/czn-dioxus"
+keywords = ["dioxus", "signatures", "certificates", "crypto"]
+categories = ["gui", "cryptography"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+dioxus = { version = "0.7.1", features = ["desktop", "router"] }
+reqwest = { version = "0.12.25", features = ["json"] }
+tokio = { version = "1.48.0", features = ["full"] }
+serde = { version = "1.0.228", features = ["derive"] }
+windows = { version = "0.54.0", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+    "Win32_Security_Cryptography_Certificates",
+    "Win32_System_Time",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+chrono = { version = "0.4.42", features = ["clock"] }
+rfd = "0.14.1"  # For file dialogs
+winapi = { version = "0.3.9", features = ["winuser", "winbase", "wincrypt"] }
+hex = "0.4.3"    # For hex encoding
+encoding_rs = "0.8.35"
+
+[features]
+default = ["desktop"]
+web = ["dioxus/web"]
+desktop = ["dioxus/desktop"]
+mobile = ["dioxus/mobile"]
