@@ -5,7 +5,7 @@ mod certificate;
 mod signing;
 
 use certificate::{CertificateInfo, find_certificates};
-use signing::sign_file_with_certificate;
+use signing::{sign_file_with_certificate, extract_attr};
 
 const FAVICON: Asset = asset!("/assets/favicon.ico");
 const MAIN_CSS: Asset = asset!("/assets/main.css");
@@ -70,11 +70,12 @@ fn CertificateSection(certificates: Vec<CertificateInfo>) -> Element {
         }
     });
 
-    // ✅ .cloned().take(6).collect() → сами объекты, не ссылки
+    // Преобразуем в вектор (владение)
     let certs = filtered_certs().into_iter().take(6).collect::<Vec<_>>();
 
     rsx! {
         div { class: "space-y-6",
+            // Поле поиска
             div { class: "mb-6",
                 input {
                     class: "w-full p-3 rounded bg-gray-800 text-white border border-gray-700 focus:outline-none focus:border-blue-500",
@@ -86,8 +87,9 @@ fn CertificateSection(certificates: Vec<CertificateInfo>) -> Element {
                     "Найдено: {filtered_certs().len()} сертификатов"
                 }
             }
+
+            // Сетка сертификатов
             div { class: "grid grid-cols-1 md:grid-cols-3 lg:grid-cols-3 gap-6",
-                // ✅ cert — уже владеющий объект
                 for cert in certs {
                     div {
                         class: "relative overflow-hidden rounded-2xl border border-gray-700 bg-gradient-to-br from-gray-800/90 via-gray-800 to-gray-900 p-5 shadow-xl transition-transform duration-200 hover:-translate-y-1 hover:border-blue-500/70 hover:shadow-blue-900/30 whitespace-normal break-words cursor-pointer",
@@ -111,26 +113,72 @@ fn CertificateSection(certificates: Vec<CertificateInfo>) -> Element {
                                 loading.set(false);
                             });
                         },
-                        div { class: "absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-blue-500 via-cyan-400 to-blue-500" }
-                        h4 { class: "text-lg font-semibold text-white mb-3", "{cert.issuer_name}" }
-                        div { class: "space-y-1 text-xs text-gray-300",
-                            p { class: "font-medium",
-                                "{cert.subject_name.split(',').next().unwrap_or(&cert.subject_name)}"
+                        // Основное содержимое карточки
+                        div { class: "space-y-1",
+                            // Показываем: CN, SN, G — каждое на отдельной строке
+                            {
+                                let cn_node = extract_attr(&cert.subject_name, "CN=")
+                                    .map(|cn| {
+                                        rsx! {
+                                            p { class: "text-white font-semibold text-base", "{cn}" }
+                                        }
+                                    });
+                                let sn_node = extract_attr(&cert.subject_name, "SN=")
+                                    .map(|sn| {
+                                        rsx! {
+                                            p { class: "text-white text-base", "{sn}" }
+                                        }
+                                    });
+                                let g_node = extract_attr(&cert.subject_name, "G=")
+                                    .map(|g| {
+                                        rsx! {
+                                            p { class: "text-white text-base", "{g}" }
+                                        }
+                                    });
+                                let fallback_node = (!cn_node.is_some() && !sn_node.is_some()
+                                    && !g_node.is_some())
+                                    .then(|| {
+                                        let fallback = cert
+                                            .subject_name
+                                            .split(',')
+                                            .next()
+                                            .unwrap_or(&cert.subject_name);
+                                        rsx! {
+                                            p { class: "text-white font-semibold text-base", "{fallback}" }
+                                        }
+                                    });
+                                rsx! {
+                                    {cn_node}
+                                    {sn_node}
+                                    {g_node}
+                                    {fallback_node}
+                                }
                             }
-                            p { class: "text-gray-400",
-                                "Срок: {cert.valid_from} – {cert.valid_to}"
+                            // ИНН юрлица
+                            {
+                                if let Some(inn) = extract_attr(&cert.subject_name, "INN=") {
+                                    let is_company = extract_attr(&cert.subject_name, "O=").is_some()
+                                        || extract_attr(&cert.subject_name, "OU=").is_some();
+                                    if is_company { Some(rsx! {
+                                        p { class: "text-blue-300 text-sm", "ИНН: {inn}" }
+                                    }) } else { None }
+                                } else {
+                                    None
+                                }
                             }
                         }
                     }
                 }
             }
 
+            // Отображение статуса
             if let Some(msg) = sign_status() {
                 div { class: "rounded-xl border border-blue-700/50 bg-blue-900/20 text-blue-100 px-4 py-3 text-sm shadow-inner",
                     "{msg}"
                 }
             }
 
+            // Спиннер загрузки
             if loading() {
                 div { class: "fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50",
                     div { class: "bg-gray-800 rounded-lg p-6 flex flex-col items-center space-y-4",

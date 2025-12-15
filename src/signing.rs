@@ -24,6 +24,11 @@ pub fn prepare_signature_message(cert: &crate::certificate::CertificateInfo) -> 
     format!("Подпись файла с помощью: {}", cert.subject_name)
 }
 
+pub fn extract_attr(s: &str, key: &str) -> Option<String> {
+    s.split(',').find(|part| part.trim().starts_with(key))
+        .map(|part| part.trim()[key.len()..].to_string())
+}
+
 pub async fn sign_file_with_certificate(cert: &crate::certificate::CertificateInfo) -> Result<String, String> {
     let user_dir = env::var("USERPROFILE").map_err(|_| "Не удалось получить USERPROFILE".to_string())?;
     let key_path = Path::new(&user_dir).join("key");
@@ -121,10 +126,6 @@ fn extract_surname_or_cn(subject: &str) -> Option<String> {
         .or_else(|| Some(subject.split(',').next()?.trim().to_string()))
 }
 
-fn extract_attr(s: &str, key: &str) -> Option<String> {
-    s.split(',').find(|part| part.trim().starts_with(key))
-        .map(|part| part.trim()[key.len()..].to_string())
-}
 
 pub fn attr_value(dn: &str, prefix: &str) -> String {
     extract_attr(dn, prefix).unwrap_or_default()
