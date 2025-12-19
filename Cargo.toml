@@ -26,7 +26,7 @@ windows = { version = "0.54.0", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
-chrono = { version = "0.4.42", features = ["clock"] }
+chrono = { version = "0.4.42", features = ["clock", "serde", "std"] }
 rfd = "0.14.1"  # For file dialogs
 winapi = { version = "0.3.9", features = ["winuser", "winbase", "wincrypt"] }
 hex = "0.4.3"    # For hex encoding

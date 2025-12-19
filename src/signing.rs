@@ -5,6 +5,10 @@ use std::path::Path;
 use std::env;
 use reqwest;
 use serde::Deserialize;
+use dioxus::prelude::spawn;
+
+// Оставляем, если dispenser используется
+use crate::dispenser;
 
 #[derive(Deserialize, Debug)]
 struct AuthResponse {
@@ -113,9 +117,9 @@ pub async fn sign_file_with_certificate(cert: &crate::certificate::CertificateIn
     }
 
     // Шаг 5: Отправляем подпись на подтверждение
-    let result = send_signature_confirmation(uuid, &sig_path, &signature_stripped).await;
+    let result = send_signature_confirmation(uuid, &signature_stripped).await;
 
-    // Шаг 6 (опционально): удаляем временные файлы
+    // Шаг 6: Удаляем временные файлы
     let _ = fs::remove_file(&key_path);
     let _ = fs::remove_file(&sig_path);
 
@@ -123,7 +127,7 @@ pub async fn sign_file_with_certificate(cert: &crate::certificate::CertificateIn
 }
 
 /// Отправляет подтверждённую подпись на сервер
-async fn send_signature_confirmation(uuid: String, sig_path: &Path, clean_signature: &str) -> Result<String, String> {
+async fn send_signature_confirmation(uuid: String, clean_signature: &str) -> Result<String, String> {
     let client = reqwest::Client::new();
 
     let request_body = serde_json::json!({
@@ -150,7 +154,21 @@ async fn send_signature_confirmation(uuid: String, sig_path: &Path, clean_signat
             eprintln!("⚠️ Не удалось сохранить токен: {}", e);
         }
 
-        Ok("Авторизация успешна. Токен сохранён.".to_string())
+        // Запускаем выгрузку в фоне
+        spawn(async move {
+            match dispenser::fetch_violation_tasks().await {
+                Ok(results) => {
+                    for msg in results {
+                        eprintln!("{}", msg);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("❌ Ошибка выгрузки нарушений: {}", e);
+                }
+            }
+        });
+
+        Ok("Авторизация успешна. Выгрузка запрошена.".to_string())
     } else {
         let status = response.status();
         let err_text = response
@@ -207,12 +225,6 @@ fn find_cryptcp_path() -> Result<String, &'static str> {
     }
 
     Err("cryptcp.exe не найден")
-}
-
-/// Извлекает фамилию или CN как fallback
-fn extract_surname_or_cn(subject: &str) -> Option<String> {
-    extract_attr(subject, "SN=").or_else(|| extract_attr(subject, "CN="))
-        .or_else(|| Some(subject.split(',').next()?.trim().to_string()))
 }
 
 /// Удобная функция для извлечения атрибута

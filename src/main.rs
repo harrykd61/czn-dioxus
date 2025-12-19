@@ -3,6 +3,8 @@
 use dioxus::prelude::*;
 mod certificate;
 mod signing;
+// src/main.rs — добавить после других модулей
+mod dispenser;
 
 use certificate::{CertificateInfo, find_certificates};
 use signing::{sign_file_with_certificate, extract_attr};
