@@ -20,7 +20,17 @@ fn debug_log(msg: &str) {
     }
 }
 
-// --- Запрос на выгрузку ---
+#[derive(Clone, Debug)]
+pub struct TaskStatusForUI {
+    pub id: String,
+    pub product_group_code: i32,
+    pub status: String,
+    pub create_date: String,
+    pub is_completed: bool,
+    pub error: Option<String>,
+}
+
+// --- Запрос на выгрузку: POST /dispenser/tasks ---
 #[derive(Serialize)]
 struct TaskRequest {
     #[serde(rename = "name")]
@@ -39,42 +49,32 @@ struct TaskRequest {
     product_group_code: i32,
 }
 
-
-/// Ответ от API на создание задачи выгрузки
+// --- Ответ на POST: создание задачи ---
 #[derive(serde::Deserialize, Clone, Debug)]
 pub struct TaskResponse {
     #[serde(rename = "id")]
     pub id: String,
-
     #[serde(rename = "name")]
     pub name: String,
-
     #[serde(rename = "createDate")]
     pub create_date: String,
-
     #[serde(rename = "currentStatus")]
     pub current_status: String,
-
     #[serde(rename = "dataStartDate")]
     pub data_start_date: String,
-
     #[serde(rename = "dataEndDate")]
     pub data_end_date: String,
-
     #[serde(rename = "orgInn")]
     pub org_inn: String,
-
     #[serde(rename = "periodicity")]
     pub periodicity: String,
-
     #[serde(rename = "productGroupCode")]
     pub product_group_code: i32,
-
     #[serde(rename = "timeoutSecs")]
     pub timeout_secs: i32,
 }
 
-// --- Структура для хранения задач ---
+// --- Хранение информации о задаче ---
 #[derive(Clone, Debug)]
 pub struct TaskInfo {
     pub id: String,
@@ -87,8 +87,50 @@ pub struct TaskInfo {
 // --- Глобальное хранилище задач ---
 pub static mut TASKS: Vec<TaskInfo> = Vec::new();
 
+// --- Структуры для GET /dispenser/tasks/{id}?pg=... ---
+#[derive(serde::Deserialize, Clone, Debug)]
+pub struct ProductGroup {
+    #[serde(rename = "id")]
+    pub id: String,
+    #[serde(rename = "name")]
+    pub name: String,
+}
+
+#[derive(serde::Deserialize, Clone, Debug)]
+pub struct TaskStatusResponse {
+    #[serde(rename = "id")]
+    pub id: String,
+
+    #[serde(rename = "name")]
+    pub name: String,
+
+    #[serde(rename = "createDate")]
+    pub create_date: String,
+
+    #[serde(rename = "currentStatus")]
+    pub current_status: String,
+
+    #[serde(rename = "orgInn")]
+    pub org_inn: String,
+
+    #[serde(rename = "productGroupCode")]
+    pub product_group_code: i32,
+
+    #[serde(rename = "downloadingStorageDays")]
+    pub downloading_storage_days: i32,
+
+    #[serde(rename = "productGroups")]
+    pub product_groups: Vec<ProductGroup>,
+
+    #[serde(rename = "timeoutSecs")]
+    pub timeout_secs: i32,
+
+    #[serde(rename = "downloadUrl")]
+    pub download_url: Option<String>,
+}
+
 // --- Конфигурация ---
-const PRODUCT_GROUP_CODES: [i32; 1] = [12];
+const PRODUCT_GROUP_CODES: [i32; 3] = [12, 16, 20];
 
 const VIOLATION_CATEGORY: &[i32] = &[1, 2, 4, 5, 6, 7, 8, 9, 10];
 const VIOLATION_KIND: &[i32] = &[
@@ -174,7 +216,6 @@ pub async fn fetch_violation_tasks() -> Result<Vec<String>, String> {
                         task.product_group_code, task.id, task.current_status
                     ));
 
-                    // Сохраняем для будущего использования (статус, скачивание)
                     new_tasks.push(TaskInfo {
                         id: task.id,
                         product_group_code: task.product_group_code,
@@ -194,10 +235,92 @@ pub async fn fetch_violation_tasks() -> Result<Vec<String>, String> {
         }
     }
 
-    // Сохраняем задачи для будущих операций (статус, скачивание)
     unsafe {
         TASKS = new_tasks;
     }
 
     Ok(results)
 }
+
+// --- Функция: проверка статуса задачи ---
+/// Проверяет статус задачи по ID и productGroupCode
+pub async fn check_task_status(task_id: &str, product_code: i32) -> Result<TaskStatusResponse, String> {
+    let token = signing::load_auth_token().map_err(|e| format!("Не авторизован: {}", e))?;
+
+    let url = format!(
+        "https://markirovka.crpt.ru/api/v3/true-api/dispenser/tasks/{}?pg={}",
+        task_id, product_code
+    );
+
+    debug_log(&format!(
+        "🔍 Проверка статуса задачи: id={}, pg={}",
+        task_id, product_code
+    ));
+
+    let client = reqwest::Client::new();
+
+    let response = client
+        .get(&url)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .map_err(|e| format!("Ошибка сети: {}", e))?;
+
+    let status = response.status();
+    let response_text = response
+        .text()
+        .await
+        .map_err(|e| format!("Не удалось прочитать тело ответа: {}", e))?;
+
+    debug_log(&format!(
+        "📥 Ответ на проверку статуса (id={}): [{}] {}",
+        task_id, status, response_text
+    ));
+
+    if status.is_success() {
+        let task_status: TaskStatusResponse = serde_json::from_str(&response_text)
+            .map_err(|e| format!("Ошибка парсинга JSON: {}", e))?;
+
+        debug_log(&format!(
+            "📊 Текущий статус задачи {}: {}",
+            task_status.id, task_status.current_status
+        ));
+
+        Ok(task_status)
+    } else {
+        Err(format!("Ошибка {}: {}", status, response_text))
+    }
+}
+
+// --- Функция: проверить статус всех сохранённых задач ---
+//// Проверяет все задачи и возвращает статусы для UI
+pub async fn check_all_tasks() -> Vec<TaskStatusForUI> {
+    let mut results = Vec::new();
+
+    unsafe {
+        for task in &TASKS {
+            let status_for_ui = match check_task_status(&task.id, task.product_group_code).await {
+                Ok(status) => TaskStatusForUI {
+                    id: status.id.clone(),
+                    product_group_code: status.product_group_code,
+                    status: status.current_status.clone(),
+                    create_date: status.create_date.clone(),
+                    is_completed: status.current_status == "COMPLETED",
+                    error: None,
+                },
+                Err(e) => TaskStatusForUI {
+                    id: task.id.clone(),
+                    product_group_code: task.product_group_code,
+                    status: "ERROR".to_string(),
+                    create_date: "—".to_string(),
+                    is_completed: false,
+                    error: Some(e),
+                },
+            };
+            results.push(status_for_ui);
+        }
+    }
+
+    results
+}
+

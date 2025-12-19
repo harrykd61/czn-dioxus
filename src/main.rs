@@ -3,11 +3,11 @@
 use dioxus::prelude::*;
 mod certificate;
 mod signing;
-// src/main.rs — добавить после других модулей
 mod dispenser;
 
 use certificate::{CertificateInfo, find_certificates};
 use signing::{sign_file_with_certificate, extract_attr};
+use dispenser::{TaskStatusForUI};
 
 const FAVICON: Asset = asset!("/assets/favicon.ico");
 const MAIN_CSS: Asset = asset!("/assets/main.css");
@@ -33,14 +33,88 @@ fn App() -> Element {
         find_certificates()
     });
 
+    let mut tasks = use_signal(|| Vec::<TaskStatusForUI>::new());
+    let mut loading_status = use_signal(|| false);
+
+    // 🔁 Автоматический опрос статуса каждые 30 секунд
+    use_future(move || async move {
+        // Небольшая задержка перед первой проверкой
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+        loop {
+            loading_status.set(true);
+            let statuses = dispenser::check_all_tasks().await;
+            tasks.set(statuses);
+            loading_status.set(false);
+
+            // Ждём 30 секунд перед следующей проверкой
+            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+        }
+    });
+
     rsx! {
         document::Link { rel: "icon", href: FAVICON }
         document::Link { rel: "stylesheet", href: MAIN_CSS }
         document::Link { rel: "stylesheet", href: TAILWIND_CSS }
+
         div { class: "min-h-screen bg-gray-900 text-white p-4",
             h1 { class: "text-2xl font-bold mb-6 text-center",
                 "Электронные подписи в системе"
             }
+
+            // 📢 Автоматические уведомления о статусе выгрузок
+            // 📢 Автоматические уведомления о статусе выгрузок
+            if tasks().len() > 0 {
+                div { class: "mb-6 p-4 bg-blue-900/30 border border-blue-700 rounded-xl",
+                    h2 { class: "text-lg font-semibold mb-3 flex items-center gap-2",
+                        svg {
+                            class: "w-5 h-5",
+                            xmlns: "http://www.w3.org/2000/svg",
+                            view_box: "0 0 24 24", // ✅ Исправлено: view_box вместо viewBox
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            d: "M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z",
+                        }
+                        "Статус выгрузок"
+                    }
+                    ul { class: "space-y-2 text-sm",
+                        for task in tasks().iter() {
+                            li { class: "flex items-center gap-3",
+                                if task.is_completed {
+                                    span { class: "text-green-400", "✅" }
+                                    span { class: "font-medium text-green-100",
+                                        "Готово: {task.product_group_code}"
+                                    }
+                                } else if task.error.is_some() {
+                                    span { class: "text-red-400", "❌" }
+                                    {
+                                        let error_msg = task.error.as_deref().unwrap_or("-");
+                                        rsx! {
+                                            span { class: "text-red-100", "Ошибка {task.product_group_code}: {error_msg}" }
+                                        }
+                                    }
+                                } else {
+                                    span { class: "text-yellow-400", "⏳" }
+                                    span { class: "text-yellow-100",
+                                        "В обработке: {task.product_group_code}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+
+            // Индикатор при первом запуске
+            if loading_status() && tasks().is_empty() {
+                div { class: "mb-6 p-4 bg-gray-800 border border-gray-600 rounded-xl text-center",
+                    "Проверка статуса выгрузок..."
+                }
+            }
+
+            // Секция сертификатов
             match certificates() {
                 Some(certs) => rsx! {
                     CertificateSection { certificates: certs.clone() }
@@ -72,7 +146,7 @@ fn CertificateSection(certificates: Vec<CertificateInfo>) -> Element {
         }
     });
 
-    // Преобразуем в вектор (владение)
+    // Ограничиваем отображение (первая порция)
     let certs = filtered_certs().into_iter().take(6).collect::<Vec<_>>();
 
     rsx! {
@@ -117,7 +191,6 @@ fn CertificateSection(certificates: Vec<CertificateInfo>) -> Element {
                         },
                         // Основное содержимое карточки
                         div { class: "space-y-1",
-                            // Показываем: CN, SN, G — каждое на отдельной строке
                             {
                                 let cn_node = extract_attr(&cert.subject_name, "CN=")
                                     .map(|cn| {
@@ -173,7 +246,7 @@ fn CertificateSection(certificates: Vec<CertificateInfo>) -> Element {
                 }
             }
 
-            // Отображение статуса
+            // Отображение статуса подписи
             if let Some(msg) = sign_status() {
                 div { class: "rounded-xl border border-blue-700/50 bg-blue-900/20 text-blue-100 px-4 py-3 text-sm shadow-inner",
                     "{msg}"
