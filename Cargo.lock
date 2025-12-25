@@ -846,6 +846,7 @@ dependencies = [
  "dioxus",
  "encoding_rs",
  "hex",
+ "once_cell",
  "reqwest",
  "rfd 0.14.1",
  "serde",

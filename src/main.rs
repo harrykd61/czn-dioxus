@@ -36,9 +36,7 @@ fn App() -> Element {
     let mut tasks = use_signal(|| Vec::<TaskStatusForUI>::new());
     let mut loading_status = use_signal(|| false);
 
-    // 🔁 Автоматический опрос статуса каждые 30 секунд
     use_future(move || async move {
-        // Небольшая задержка перед первой проверкой
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
         loop {
@@ -47,7 +45,6 @@ fn App() -> Element {
             tasks.set(statuses);
             loading_status.set(false);
 
-            // Ждём 30 секунд перед следующей проверкой
             tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
         }
     });
@@ -62,15 +59,13 @@ fn App() -> Element {
                 "Электронные подписи в системе"
             }
 
-            // 📢 Автоматические уведомления о статусе выгрузок
-            // 📢 Автоматические уведомления о статусе выгрузок
             if tasks().len() > 0 {
                 div { class: "mb-6 p-4 bg-blue-900/30 border border-blue-700 rounded-xl",
                     h2 { class: "text-lg font-semibold mb-3 flex items-center gap-2",
                         svg {
                             class: "w-5 h-5",
                             xmlns: "http://www.w3.org/2000/svg",
-                            view_box: "0 0 24 24", // ✅ Исправлено: view_box вместо viewBox
+                            view_box: "0 0 24 24",
                             fill: "none",
                             stroke: "currentColor",
                             stroke_width: "2",
@@ -84,20 +79,20 @@ fn App() -> Element {
                                 if task.is_completed {
                                     span { class: "text-green-400", "✅" }
                                     span { class: "font-medium text-green-100",
-                                        "Готово: {task.product_group_code}"
+                                        "Готово: {task.display_name()}"
                                     }
                                 } else if task.error.is_some() {
                                     span { class: "text-red-400", "❌" }
                                     {
                                         let error_msg = task.error.as_deref().unwrap_or("-");
                                         rsx! {
-                                            span { class: "text-red-100", "Ошибка {task.product_group_code}: {error_msg}" }
+                                            span { class: "text-red-100", "Ошибка {task.display_name()}: {error_msg}" }
                                         }
                                     }
                                 } else {
                                     span { class: "text-yellow-400", "⏳" }
                                     span { class: "text-yellow-100",
-                                        "В обработке: {task.product_group_code}"
+                                        "В обработке: {task.display_name()}"
                                     }
                                 }
                             }
@@ -106,15 +101,12 @@ fn App() -> Element {
                 }
             }
 
-
-            // Индикатор при первом запуске
             if loading_status() && tasks().is_empty() {
                 div { class: "mb-6 p-4 bg-gray-800 border border-gray-600 rounded-xl text-center",
                     "Проверка статуса выгрузок..."
                 }
             }
 
-            // Секция сертификатов
             match certificates() {
                 Some(certs) => rsx! {
                     CertificateSection { certificates: certs.clone() }
@@ -146,12 +138,10 @@ fn CertificateSection(certificates: Vec<CertificateInfo>) -> Element {
         }
     });
 
-    // Ограничиваем отображение (первая порция)
     let certs = filtered_certs().into_iter().take(6).collect::<Vec<_>>();
 
     rsx! {
         div { class: "space-y-6",
-            // Поле поиска
             div { class: "mb-6",
                 input {
                     class: "w-full p-3 rounded bg-gray-800 text-white border border-gray-700 focus:outline-none focus:border-blue-500",
@@ -164,7 +154,6 @@ fn CertificateSection(certificates: Vec<CertificateInfo>) -> Element {
                 }
             }
 
-            // Сетка сертификатов
             div { class: "grid grid-cols-1 md:grid-cols-3 lg:grid-cols-3 gap-6",
                 for cert in certs {
                     div {
@@ -189,7 +178,6 @@ fn CertificateSection(certificates: Vec<CertificateInfo>) -> Element {
                                 loading.set(false);
                             });
                         },
-                        // Основное содержимое карточки
                         div { class: "space-y-1",
                             {
                                 let cn_node = extract_attr(&cert.subject_name, "CN=")
@@ -229,7 +217,6 @@ fn CertificateSection(certificates: Vec<CertificateInfo>) -> Element {
                                     {fallback_node}
                                 }
                             }
-                            // ИНН юрлица
                             {
                                 if let Some(inn) = extract_attr(&cert.subject_name, "INN=") {
                                     let is_company = extract_attr(&cert.subject_name, "O=").is_some()
@@ -246,14 +233,12 @@ fn CertificateSection(certificates: Vec<CertificateInfo>) -> Element {
                 }
             }
 
-            // Отображение статуса подписи
             if let Some(msg) = sign_status() {
                 div { class: "rounded-xl border border-blue-700/50 bg-blue-900/20 text-blue-100 px-4 py-3 text-sm shadow-inner",
                     "{msg}"
                 }
             }
 
-            // Спиннер загрузки
             if loading() {
                 div { class: "fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50",
                     div { class: "bg-gray-800 rounded-lg p-6 flex flex-col items-center space-y-4",
