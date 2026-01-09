@@ -4,6 +4,7 @@ use dioxus::prelude::*;
 mod certificate;
 mod signing;
 mod dispenser;
+mod storage; // ← добавлено
 
 use certificate::{CertificateInfo, find_certificates};
 use signing::{sign_file_with_certificate, extract_attr};
@@ -15,15 +16,20 @@ const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
 #[cfg(feature = "desktop")]
 fn main() {
-    use dioxus::desktop::Config;
+    // 🔽 Гарантируем создание .czn перед запуском UI
+    if let Err(e) = crate::storage::ensure_czn_dir() {
+        eprintln!("🚨 Не удалось инициализировать директорию приложения: {}", e);
+        return;
+    }
 
     dioxus::LaunchBuilder::desktop()
-        .with_cfg(Config::default().with_menu(None))
+        .with_cfg(dioxus::desktop::Config::default().with_menu(None))
         .launch(App);
 }
 
 #[cfg(not(feature = "desktop"))]
 fn main() {
+    // Для web — storage не используется (пока)
     dioxus::launch(App);
 }
 

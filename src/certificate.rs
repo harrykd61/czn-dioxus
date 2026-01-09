@@ -1,13 +1,16 @@
 // src/certificate.rs
-use std::{ffi::c_void, fmt, time::{Duration, SystemTime}};
+use std::{
+    ffi::c_void,
+    fmt,
+    time::{Duration, SystemTime},
+};
 use windows::{
     core::w,
     Win32::Foundation::{FILETIME, SYSTEMTIME},
     Win32::Security::Cryptography::{
         CertCloseStore, CertEnumCertificatesInStore, CertGetCertificateContextProperty,
-        CertNameToStrW, CertOpenSystemStoreW, CERT_CONTEXT, CERT_HASH_PROP_ID,
-        CERT_X500_NAME_STR, CRYPT_INTEGER_BLOB, HCRYPTPROV_LEGACY, PKCS_7_ASN_ENCODING,
-        X509_ASN_ENCODING,
+        CertNameToStrW, CertOpenSystemStoreW, CERT_CONTEXT, CERT_HASH_PROP_ID, CERT_X500_NAME_STR,
+        CRYPT_INTEGER_BLOB, HCRYPTPROV_LEGACY, PKCS_7_ASN_ENCODING, X509_ASN_ENCODING,
     },
     Win32::System::Time::FileTimeToSystemTime,
 };
@@ -145,13 +148,8 @@ fn format_thumbprint(cert_context: *const CERT_CONTEXT) -> String {
     unsafe {
         let mut hash_len: u32 = 0;
 
-        if CertGetCertificateContextProperty(
-            cert_context,
-            CERT_HASH_PROP_ID,
-            None,
-            &mut hash_len,
-        )
-        .is_err()
+        if CertGetCertificateContextProperty(cert_context, CERT_HASH_PROP_ID, None, &mut hash_len)
+            .is_err()
             || hash_len == 0
         {
             return "Unknown".to_string();
@@ -201,6 +199,7 @@ fn filetime_to_system_time(file_time: FILETIME) -> Option<SystemTime> {
     const WINDOWS_TO_UNIX_EPOCH_DIFF_SECS: u64 = 11_644_473_600;
     let ticks = ((file_time.dwHighDateTime as u64) << 32) | file_time.dwLowDateTime as u64;
     let total_ns = ticks.saturating_mul(100);
-    let unix_ns = total_ns.checked_sub(WINDOWS_TO_UNIX_EPOCH_DIFF_SECS.saturating_mul(1_000_000_000))?;
+    let unix_ns =
+        total_ns.checked_sub(WINDOWS_TO_UNIX_EPOCH_DIFF_SECS.saturating_mul(1_000_000_000))?;
     Some(SystemTime::UNIX_EPOCH + Duration::from_nanos(unix_ns))
 }

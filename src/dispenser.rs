@@ -4,10 +4,7 @@ use crate::signing;
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use reqwest;
 use serde::Serialize;
-use std::env;
-use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::Path;
 use std::sync::Mutex;
 use once_cell::sync::Lazy;
 use tokio::task;
@@ -15,17 +12,23 @@ use tokio::task;
 // --- Потокобезопасное хранилище задач ---
 static TASKS: Lazy<Mutex<Vec<TaskInfo>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
-// --- Утилита логирования (асинхронная) ---
+// --- Логирование в файл через storage ---
 fn debug_log(msg: &str) {
     let msg = msg.to_string();
-    task::spawn_blocking(move || {
-        if let Ok(user_dir) = env::var("USERPROFILE") {
-            let log_path = Path::new(&user_dir).join("czn-debug.log");
-            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
+    std::thread::spawn(move || {
+        let log_path = match crate::storage::log_path() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+            .and_then(|mut file| {
                 let timestamp = Local::now().format("[%Y-%m-%d %H:%M:%S]").to_string();
-                let _ = writeln!(file, "{} {}", timestamp, msg);
-            }
-        }
+                writeln!(file, "{} {}", timestamp, msg)
+            });
     });
 }
 
@@ -180,9 +183,13 @@ pub struct TaskStatusResponse {
 
 // --- Конфиг ---
 const PRODUCT_GROUP_CODES: [i32; 3] = [12, 16, 20];
-const VIOLATION_CATEGORY: &[i32] = &[1, 2, 4, 5, 6, 7, 8, 9, 10];
+const VIOLATION_CATEGORY: &[i32] = &[
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+];
 const VIOLATION_KIND: &[i32] = &[
-    1, 2, 5, 12, 13, 3, 24, 25, 6, 7, 10, 11, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 26,
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+    27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
+    51, 52, 53, 54, 55, 56, 57, 58, 59, 60,
 ];
 
 // --- Вспомогательные функции ---
@@ -199,7 +206,10 @@ where
             Ok(res) => return Ok(res),
             Err(e) if attempts < 3 => {
                 attempts += 1;
-                debug_log(&format!("🔁 Повтор запроса через {} сек (ошибка: {})", delay, e));
+                debug_log(&format!(
+                    "🔁 Повтор запроса через {} сек (ошибка: {})",
+                    delay, e
+                ));
                 tokio::time::sleep(tokio::time::Duration::from_secs(delay)).await;
                 delay *= 2;
             }
@@ -324,7 +334,10 @@ pub async fn fetch_violation_tasks() -> Result<Vec<String>, String> {
             }
             Err(e) => {
                 debug_log(&format!("❌ Запрос не удался после 3 попыток: {}", e));
-                results.push(format!("❌ Не удалось создать задачу для pg={}: {}", code, e));
+                results.push(format!(
+                    "❌ Не удалось создать задачу для pg={}: {}",
+                    code, e
+                ));
             }
         }
     }
@@ -339,7 +352,10 @@ pub async fn fetch_violation_tasks() -> Result<Vec<String>, String> {
 }
 
 // --- Проверка статуса одной задачи ---
-pub async fn check_task_status(task_id: &str, product_code: i32) -> Result<TaskStatusResponse, String> {
+pub async fn check_task_status(
+    task_id: &str,
+    product_code: i32,
+) -> Result<TaskStatusResponse, String> {
     let token = signing::load_auth_token().map_err(|e| format!("Не авторизован: {}", e))?;
 
     let url = format!(
@@ -347,7 +363,10 @@ pub async fn check_task_status(task_id: &str, product_code: i32) -> Result<TaskS
         task_id, product_code
     );
 
-    debug_log(&format!("🔍 Проверка статуса: id={}, pg={}", task_id, product_code));
+    debug_log(&format!(
+        "🔍 Проверка статуса: id={}, pg={}",
+        task_id, product_code
+    ));
 
     send_with_retry(move || {
         let client = reqwest::Client::new();

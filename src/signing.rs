@@ -1,13 +1,10 @@
 // src/signing.rs
 
-use std::fs;
+use std::process::Command;
 use std::path::Path;
-use std::env;
 use reqwest;
 use serde::Deserialize;
 use dioxus::prelude::spawn;
-
-// Оставляем, если dispenser используется
 use crate::dispenser;
 
 #[derive(Deserialize, Debug)]
@@ -21,29 +18,27 @@ struct SignInResponse {
     token: String,
 }
 
-// Путь к временным файлам
-fn get_user_file(name: &str) -> std::io::Result<std::path::PathBuf> {
-    let mut path = std::path::PathBuf::from(env::var("USERPROFILE").map_err(|_| std::io::Error::from(std::io::ErrorKind::NotFound))?);
-    path.push(name);
-    Ok(path)
-}
-
-/// Подготавливает сообщение для отображения
+/// Подготавливает сообщение для отображения в UI
 pub fn prepare_signature_message(cert: &crate::certificate::CertificateInfo) -> String {
     format!("Подпись файла с помощью: {}", cert.subject_name)
 }
 
-/// Извлекает значение атрибута из строки вида CN=..., SN=...
+/// Извлекает значение атрибута из строки вроде CN=..., SN=...
+/// Пример: extract_attr("CN=Иванов, SN=Иван", "CN=") -> Some("Иванов".to_string())
 pub fn extract_attr(s: &str, key: &str) -> Option<String> {
     s.split(',')
         .find(|part| part.trim().starts_with(key))
         .map(|part| part.trim()[key.len()..].to_string())
 }
 
-/// Основная функция: получает данные, подписывает, отправляет подпись, сохраняет токен
+/// Основная функция: получает challenge, подписывает, отправляет подпись, сохраняет токен
 pub async fn sign_file_with_certificate(cert: &crate::certificate::CertificateInfo) -> Result<String, String> {
-    let key_path = get_user_file("key").map_err(|e| format!("Не удалось получить путь к key: {}", e))?;
-    let sig_path = get_user_file("key.sig").map_err(|e| format!("Не удалось получить путь к sig: {}", e))?;
+    // Получаем пути к временным файлам
+    let key_path = crate::storage::key_path().map_err(|e| format!("Не удалось получить путь к key: {}", e))?;
+    let sig_path = crate::storage::sig_path().map_err(|e| format!("Не удалось получить путь к sig: {}", e))?;
+
+    // Убеждаемся, что папка .czn / czn-dioxus существует
+    let _ = crate::storage::ensure_czn_dir();
 
     // Шаг 1: GET /auth/key — получение данных для подписи
     let client = reqwest::Client::new();
@@ -60,8 +55,8 @@ pub async fn sign_file_with_certificate(cert: &crate::certificate::CertificateIn
     let uuid = response.uuid;
     let data = response.data;
 
-    // Шаг 2: Сохраняем data в key
-    fs::write(&key_path, data.as_bytes())
+    // Шаг 2: Сохраняем данные в временный файл `key`
+    std::fs::write(&key_path, data.as_bytes())
         .map_err(|e| format!("Не удалось записать файл {}: {}", key_path.display(), e))?;
 
     // Шаг 3: Подписываем через cryptcp.exe
@@ -73,19 +68,23 @@ pub async fn sign_file_with_certificate(cert: &crate::certificate::CertificateIn
 
     let thumb = cert.thumbprint.replace(":", "").replace(" ", "").to_uppercase();
 
-    let mut cmd = std::process::Command::new(&cryptcp_path);
+    let mut cmd = Command::new(&cryptcp_path);
     cmd.arg("-sign").arg("-uMy").arg("-yes");
 
+    // Используем отпечаток (thumbprint), если есть
     if !thumb.is_empty() {
         cmd.arg("-thumb").arg(&thumb);
     } else {
+        // Резерв: ищем CN в Subject
         let cn = extract_attr(&cert.subject_name, "CN=").unwrap_or_default();
         cmd.arg("-dn").arg(&cn);
     }
 
+    // Указываем пути к файлам
     cmd.arg(key_path.to_str().ok_or("Недопустимый путь к key")?)
         .arg(sig_path.to_str().ok_or("Недопустимый путь к sig")?);
 
+    // Выполняем команду
     let output = cmd.output().map_err(|e| format!("Ошибка выполнения cryptcp: {}", e))?;
 
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -103,7 +102,7 @@ pub async fn sign_file_with_certificate(cert: &crate::certificate::CertificateIn
     }
 
     // Шаг 4: Читаем и очищаем подпись из key.sig
-    let signature_raw = fs::read_to_string(&sig_path)
+    let signature_raw = std::fs::read_to_string(&sig_path)
         .map_err(|e| format!("Не удалось прочитать подпись: {}", e))?;
 
     let signature_stripped = signature_raw
@@ -116,17 +115,17 @@ pub async fn sign_file_with_certificate(cert: &crate::certificate::CertificateIn
         return Err("Подпись пустая после очистки".to_string());
     }
 
-    // Шаг 5: Отправляем подпись на подтверждение
+    // Шаг 5: Отправляем подпись на сервер
     let result = send_signature_confirmation(uuid, &signature_stripped).await;
 
     // Шаг 6: Удаляем временные файлы
-    let _ = fs::remove_file(&key_path);
-    let _ = fs::remove_file(&sig_path);
+    let _ = std::fs::remove_file(&key_path);
+    let _ = std::fs::remove_file(&sig_path);
 
     result
 }
 
-/// Отправляет подтверждённую подпись на сервер
+/// Отправляет подтверждённую подпись на сервер для получения токена
 async fn send_signature_confirmation(uuid: String, clean_signature: &str) -> Result<String, String> {
     let client = reqwest::Client::new();
 
@@ -150,11 +149,12 @@ async fn send_signature_confirmation(uuid: String, clean_signature: &str) -> Res
             .await
             .map_err(|e| format!("Не удалось распарсить ответ: {}", e))?;
 
-        if let Err(e) = save_auth_token(&result.token) {
+        // 🔽 Сохраняем токен в открытом виде
+        if let Err(e) = crate::storage::save_token(&result.token) {
             eprintln!("⚠️ Не удалось сохранить токен: {}", e);
         }
 
-        // Запускаем выгрузку в фоне
+        // Запускаем выгрузку задач в фоне
         spawn(async move {
             match dispenser::fetch_violation_tasks().await {
                 Ok(results) => {
@@ -180,39 +180,22 @@ async fn send_signature_confirmation(uuid: String, clean_signature: &str) -> Res
     }
 }
 
-/// Сохраняет токен в файл
-fn save_auth_token(token: &str) -> Result<(), String> {
-    let path = get_token_file_path()?;
-    fs::write(&path, token).map_err(|e| format!("Не удалось записать токен: {}", e))
-}
-
 /// Загружает токен из файла
+/// Используется в dispenser.rs для авторизации при запросах
 pub fn load_auth_token() -> Result<String, String> {
-    let path = get_token_file_path()?;
-    if path.exists() {
-        fs::read_to_string(&path)
-            .map_err(|e| format!("Не удалось прочитать токен: {}", e))
-            .map(|s| s.trim().to_string())
-    } else {
-        Err("Токен не найден".to_string())
-    }
+    crate::storage::load_token()
 }
 
-/// Получает путь к файлу токена
-fn get_token_file_path() -> Result<std::path::PathBuf, String> {
-    let mut path = std::path::PathBuf::from(env::var("USERPROFILE").map_err(|_| "Не найдена домашняя директория")?);
-    path.push(".czn-auth-token");
-    Ok(path)
-}
-
-/// Ищет путь к утилите cryptcp.exe
+/// Ищет путь к утилите cryptcp.exe (КриптоПро)
 fn find_cryptcp_path() -> Result<String, &'static str> {
-    if let Ok(path) = env::var("CRYPTCP_PATH") {
+    // Сначала — переменная окружения
+    if let Ok(path) = std::env::var("CRYPTCP_PATH") {
         if Path::new(&path).exists() {
             return Ok(path);
         }
     }
 
+    // Стандартные пути
     let paths = [
         r"C:\Program Files\Crypto Pro\CSP\cryptcp.exe",
         r"C:\Program Files (x86)\Crypto Pro\CSP\cryptcp.exe",
@@ -227,7 +210,7 @@ fn find_cryptcp_path() -> Result<String, &'static str> {
     Err("cryptcp.exe не найден")
 }
 
-/// Удобная функция для извлечения атрибута
+/// Удобная функция для извлечения атрибута (например, INN, CN)
 pub fn attr_value(dn: &str, prefix: &str) -> String {
     extract_attr(dn, prefix).unwrap_or_default()
 }
