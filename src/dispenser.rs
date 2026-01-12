@@ -1,13 +1,13 @@
 // src/dispenser.rs
 
 use crate::signing;
+use crate::config;
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use reqwest;
 use serde::Serialize;
 use std::io::Write;
 use std::sync::Mutex;
 use once_cell::sync::Lazy;
-use tokio::task;
 
 // --- Потокобезопасное хранилище задач ---
 static TASKS: Lazy<Mutex<Vec<TaskInfo>>> = Lazy::new(|| Mutex::new(Vec::new()));
@@ -181,16 +181,7 @@ pub struct TaskStatusResponse {
     pub download_url: Option<String>,
 }
 
-// --- Конфиг ---
-const PRODUCT_GROUP_CODES: [i32; 3] = [12, 16, 20];
-const VIOLATION_CATEGORY: &[i32] = &[
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-];
-const VIOLATION_KIND: &[i32] = &[
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
-    27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
-    51, 52, 53, 54, 55, 56, 57, 58, 59, 60,
-];
+// Конфигурация импортирована в начале файла
 
 // --- Вспомогательные функции ---
 async fn send_with_retry<F, T>(mut action: F) -> Result<T, String>
@@ -234,16 +225,21 @@ pub async fn fetch_violation_tasks() -> Result<Vec<String>, String> {
     debug_log(&format!("📆 Запрос данных за период: {}", period));
 
     let params_json = serde_json::json!({
-        "violationCategory": VIOLATION_CATEGORY,
-        "violationKind": VIOLATION_KIND
+        "violationCategory": config::Config::VIOLATION_CATEGORY,
+        "violationKind": config::Config::VIOLATION_KIND
     })
     .to_string();
 
-    let client = reqwest::Client::new();
+    // Создаём HTTP клиент с тайм-аутами
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(config::Config::HTTP_TIMEOUT_SECS))
+        .connect_timeout(std::time::Duration::from_secs(config::Config::HTTP_CONNECT_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| format!("Не удалось создать HTTP клиент: {}", e))?;
     let mut results = Vec::new();
     let mut new_tasks = Vec::new();
 
-    for &code in &PRODUCT_GROUP_CODES {
+    for &code in config::Config::PRODUCT_GROUP_CODES {
         let body = TaskRequest {
             name: "VIOLATIONS".to_string(),
             data_start_date: data_start_date.clone(),
@@ -270,8 +266,9 @@ pub async fn fetch_violation_tasks() -> Result<Vec<String>, String> {
             let body = body.clone();
             let token = token_clone.clone();
             Box::pin(async move {
+                let url = format!("{}/dispenser/tasks", config::Config::API_BASE_URL);
                 let response = client
-                    .post("https://markirovka.crpt.ru/api/v3/true-api/dispenser/tasks")
+                    .post(&url)
                     .bearer_auth(&token)
                     .json(&body)
                     .send()
@@ -310,10 +307,18 @@ pub async fn fetch_violation_tasks() -> Result<Vec<String>, String> {
                             task.id, task.product_group_code, task.current_status
                         ));
 
+                        let task_info = TaskStatusForUI {
+                            id: task.id.clone(),
+                            product_group_code: task.product_group_code,
+                            status: task.current_status.clone(),
+                            create_date: task.create_date.clone(),
+                            is_completed: false,
+                            error: None,
+                        };
+                        
                         results.push(format!(
-                            "✅ Запрос #{}, {} (id: {})",
-                            task.product_group_code,
-                            task.product_group_code, // будет заменено на display_name в UI
+                            "✅ Запрос: {} (id: {})",
+                            task_info.display_name(),
                             task.id
                         ));
 
@@ -359,8 +364,8 @@ pub async fn check_task_status(
     let token = signing::load_auth_token().map_err(|e| format!("Не авторизован: {}", e))?;
 
     let url = format!(
-        "https://markirovka.crpt.ru/api/v3/true-api/dispenser/tasks/{}?pg={}",
-        task_id, product_code
+        "{}/dispenser/tasks/{}?pg={}",
+        config::Config::API_BASE_URL, task_id, product_code
     );
 
     debug_log(&format!(
@@ -369,10 +374,16 @@ pub async fn check_task_status(
     ));
 
     send_with_retry(move || {
-        let client = reqwest::Client::new();
         let url = url.clone();
         let token = token.clone();
         Box::pin(async move {
+            // Создаём клиент с тайм-аутами для каждого запроса
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(config::Config::HTTP_TIMEOUT_SECS))
+                .connect_timeout(std::time::Duration::from_secs(config::Config::HTTP_CONNECT_TIMEOUT_SECS))
+                .build()
+                .map_err(|e| format!("Не удалось создать HTTP клиент: {}", e))?;
+            
             let response = client
                 .get(&url)
                 .bearer_auth(&token)
@@ -400,10 +411,16 @@ pub async fn check_task_status(
 
 // --- Проверка всех задач ---
 pub async fn check_all_tasks() -> Vec<TaskStatusForUI> {
-    let tasks = TASKS.lock().unwrap();
+    // Клонируем список задач, чтобы освободить Mutex перед await
+    let tasks = {
+        let tasks_guard = TASKS.lock().unwrap();
+        tasks_guard.clone()
+    };
+    
     let mut results = Vec::new();
 
-    for task in &*tasks {
+    // Теперь выполняем сетевые запросы без блокировки Mutex
+    for task in tasks {
         let status_for_ui = match check_task_status(&task.id, task.product_group_code).await {
             Ok(status) => TaskStatusForUI {
                 id: status.id.clone(),

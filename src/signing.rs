@@ -41,10 +41,18 @@ pub async fn sign_file_with_certificate(cert: &crate::certificate::CertificateIn
     let _ = crate::storage::ensure_czn_dir();
 
     // Шаг 1: GET /auth/key — получение данных для подписи
-    let client = reqwest::Client::new();
+    use crate::config;
+    
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(config::Config::HTTP_TIMEOUT_SECS))
+        .connect_timeout(std::time::Duration::from_secs(config::Config::HTTP_CONNECT_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| format!("Не удалось создать HTTP клиент: {}", e))?;
+    
+    let url = format!("{}/auth/key", config::Config::API_BASE_URL);
     let response: AuthResponse = client
-        .get("https://markirovka.crpt.ru/api/v3/true-api/auth/key")
-        .header("User-Agent", "czn-dioxus/1.0")
+        .get(&url)
+        .header("User-Agent", config::Config::USER_AGENT)
         .send()
         .await
         .map_err(|e| format!("Ошибка сети (key): {}", e))?
@@ -81,11 +89,15 @@ pub async fn sign_file_with_certificate(cert: &crate::certificate::CertificateIn
     }
 
     // Указываем пути к файлам
-    cmd.arg(key_path.to_str().ok_or("Недопустимый путь к key")?)
-        .arg(sig_path.to_str().ok_or("Недопустимый путь к sig")?);
+    let key_path_str = key_path.to_str().ok_or("Недопустимый путь к key")?.to_string();
+    let sig_path_str = sig_path.to_str().ok_or("Недопустимый путь к sig")?.to_string();
+    cmd.arg(&key_path_str).arg(&sig_path_str);
 
-    // Выполняем команду
-    let output = cmd.output().map_err(|e| format!("Ошибка выполнения cryptcp: {}", e))?;
+    // Выполняем команду в отдельном потоке (блокирующая операция)
+    let output = tokio::task::spawn_blocking(move || cmd.output())
+        .await
+        .map_err(|e| format!("Ошибка выполнения задачи: {}", e))?
+        .map_err(|e| format!("Ошибка выполнения cryptcp: {}", e))?;
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -116,28 +128,47 @@ pub async fn sign_file_with_certificate(cert: &crate::certificate::CertificateIn
     }
 
     // Шаг 5: Отправляем подпись на сервер
+    // Используем структуру для гарантированной очистки временных файлов
+    struct TempFileGuard {
+        path: std::path::PathBuf,
+    }
+    
+    impl Drop for TempFileGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+    
+    let _key_guard = TempFileGuard { path: key_path.clone() };
+    let _sig_guard = TempFileGuard { path: sig_path.clone() };
+    
     let result = send_signature_confirmation(uuid, &signature_stripped).await;
-
-    // Шаг 6: Удаляем временные файлы
-    let _ = std::fs::remove_file(&key_path);
-    let _ = std::fs::remove_file(&sig_path);
-
+    
+    // Файлы будут автоматически удалены при выходе из области видимости
+    // даже в случае ошибки благодаря Drop trait
     result
 }
 
 /// Отправляет подтверждённую подпись на сервер для получения токена
 async fn send_signature_confirmation(uuid: String, clean_signature: &str) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    use crate::config;
+    
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(config::Config::HTTP_TIMEOUT_SECS))
+        .connect_timeout(std::time::Duration::from_secs(config::Config::HTTP_CONNECT_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| format!("Не удалось создать HTTP клиент: {}", e))?;
 
     let request_body = serde_json::json!({
         "uuid": uuid,
         "data": clean_signature
     });
 
+    let url = format!("{}/auth/simpleSignIn", config::Config::API_BASE_URL);
     let response = client
-        .post("https://markirovka.crpt.ru/api/v3/true-api/auth/simpleSignIn")
+        .post(&url)
         .header("Content-Type", "application/json")
-        .header("User-Agent", "czn-dioxus/1.0")
+        .header("User-Agent", config::Config::USER_AGENT)
         .json(&request_body)
         .send()
         .await

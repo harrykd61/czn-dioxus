@@ -4,7 +4,8 @@ use dioxus::prelude::*;
 mod certificate;
 mod signing;
 mod dispenser;
-mod storage; // ← добавлено
+mod storage;
+mod config;
 
 use certificate::{CertificateInfo, find_certificates};
 use signing::{sign_file_with_certificate, extract_attr};
@@ -36,22 +37,38 @@ fn main() {
 #[component]
 fn App() -> Element {
     let certificates = use_resource(|| async move {
-        find_certificates()
+        // Выносим блокирующую операцию в отдельный поток
+        tokio::task::spawn_blocking(|| find_certificates())
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("Ошибка загрузки сертификатов: {}", e);
+                Vec::new()
+            })
     });
 
     let mut tasks = use_signal(|| Vec::<TaskStatusForUI>::new());
     let mut loading_status = use_signal(|| false);
+    let should_poll = use_signal(|| true);
 
+    // Запускаем поллинг задач с возможностью отмены
     use_future(move || async move {
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        // Начальная задержка перед первой проверкой
+        tokio::time::sleep(tokio::time::Duration::from_secs(config::Config::INITIAL_DELAY_SECS)).await;
 
-        loop {
+        while should_poll() {
             loading_status.set(true);
             let statuses = dispenser::check_all_tasks().await;
             tasks.set(statuses);
             loading_status.set(false);
 
-            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+            // Ждём указанный интервал или пока не будет запрошена отмена
+            let interval = config::Config::TASK_CHECK_INTERVAL_SECS;
+            for _ in 0..interval {
+                if !should_poll() {
+                    break;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            }
         }
     });
 
@@ -92,7 +109,14 @@ fn App() -> Element {
                                     {
                                         let error_msg = task.error.as_deref().unwrap_or("-");
                                         rsx! {
-                                            span { class: "text-red-100", "Ошибка {task.display_name()}: {error_msg}" }
+                                            div { class: "flex flex-col gap-1",
+                                                span { class: "font-medium text-red-100",
+                                                    "Ошибка: {task.display_name()}"
+                                                }
+                                                span { class: "text-red-200 text-xs opacity-80",
+                                                    "{error_msg}"
+                                                }
+                                            }
                                         }
                                     }
                                 } else {
@@ -239,9 +263,26 @@ fn CertificateSection(certificates: Vec<CertificateInfo>) -> Element {
                 }
             }
 
-            if let Some(msg) = sign_status() {
-                div { class: "rounded-xl border border-blue-700/50 bg-blue-900/20 text-blue-100 px-4 py-3 text-sm shadow-inner",
-                    "{msg}"
+            {
+                if let Some(msg) = sign_status() {
+                    let is_error = msg.contains("Ошибка");
+                    rsx! {
+                        div {
+                            class: if is_error {
+                                "rounded-xl border border-red-700/50 bg-red-900/20 text-red-100 px-4 py-3 text-sm shadow-inner"
+                            } else {
+                                "rounded-xl border border-blue-700/50 bg-blue-900/20 text-blue-100 px-4 py-3 text-sm shadow-inner"
+                            },
+                            if is_error {
+                                span { class: "font-semibold", "❌ " }
+                            } else {
+                                span { class: "font-semibold", "✅ " }
+                            }
+                            "{msg}"
+                        }
+                    }
+                } else {
+                    rsx! { }
                 }
             }
 
