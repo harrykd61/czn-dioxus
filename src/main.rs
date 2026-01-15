@@ -5,11 +5,13 @@ mod certificate;
 mod signing;
 mod dispenser;
 mod storage;
+mod error; // ✅ Есть
 mod config;
 
 use certificate::{CertificateInfo, find_certificates};
-use signing::{sign_file_with_certificate, extract_attr};
-use dispenser::{TaskStatusForUI};
+use signing::{sign_file_with_certificate, extract_attr}; // ❌ Убран prepare_signature_message
+//use error::AppError;
+use std::error::Error; // ✅ Нужно для .source()
 
 const FAVICON: Asset = asset!("/assets/favicon.ico");
 const MAIN_CSS: Asset = asset!("/assets/main.css");
@@ -17,9 +19,13 @@ const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
 #[cfg(feature = "desktop")]
 fn main() {
-    // 🔽 Гарантируем создание .czn перед запуском UI
     if let Err(e) = crate::storage::ensure_czn_dir() {
-        eprintln!("🚨 Не удалось инициализировать директорию приложения: {}", e);
+        eprintln!("🚨 Критическая ошибка: не удалось создать директорию приложения");
+        eprintln!("   Сообщение: {}", e);
+        // ✅ .source() доступно, потому что AppError: Error
+        if let Some(source) = e.source() {
+            eprintln!("   Причина: {}", source);
+        }
         return;
     }
 
@@ -30,45 +36,28 @@ fn main() {
 
 #[cfg(not(feature = "desktop"))]
 fn main() {
-    // Для web — storage не используется (пока)
     dioxus::launch(App);
 }
 
 #[component]
 fn App() -> Element {
     let certificates = use_resource(|| async move {
-        // Выносим блокирующую операцию в отдельный поток
-        tokio::task::spawn_blocking(|| find_certificates())
-            .await
-            .unwrap_or_else(|e| {
-                eprintln!("Ошибка загрузки сертификатов: {}", e);
-                Vec::new()
-            })
+        find_certificates()
     });
 
-    let mut tasks = use_signal(|| Vec::<TaskStatusForUI>::new());
+    let mut tasks = use_signal(|| Vec::<dispenser::TaskStatusForUI>::new());
     let mut loading_status = use_signal(|| false);
-    let should_poll = use_signal(|| true);
 
-    // Запускаем поллинг задач с возможностью отмены
     use_future(move || async move {
-        // Начальная задержка перед первой проверкой
-        tokio::time::sleep(tokio::time::Duration::from_secs(config::Config::INITIAL_DELAY_SECS)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
-        while should_poll() {
+        loop {
             loading_status.set(true);
             let statuses = dispenser::check_all_tasks().await;
             tasks.set(statuses);
             loading_status.set(false);
 
-            // Ждём указанный интервал или пока не будет запрошена отмена
-            let interval = config::Config::TASK_CHECK_INTERVAL_SECS;
-            for _ in 0..interval {
-                if !should_poll() {
-                    break;
-                }
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
         }
     });
 
@@ -109,14 +98,7 @@ fn App() -> Element {
                                     {
                                         let error_msg = task.error.as_deref().unwrap_or("-");
                                         rsx! {
-                                            div { class: "flex flex-col gap-1",
-                                                span { class: "font-medium text-red-100",
-                                                    "Ошибка: {task.display_name()}"
-                                                }
-                                                span { class: "text-red-200 text-xs opacity-80",
-                                                    "{error_msg}"
-                                                }
-                                            }
+                                            span { class: "text-red-100", "Ошибка {task.display_name()}: {error_msg}" }
                                         }
                                     }
                                 } else {
@@ -203,6 +185,7 @@ fn CertificateSection(certificates: Vec<CertificateInfo>) -> Element {
                                     }
                                     Err(error) => {
                                         sign_status.set(Some(format!("Ошибка: {}", error)));
+                                        eprintln!("❌ Подробности: {:?}", error.root_cause());
                                     }
                                 }
                                 loading.set(false);
@@ -263,26 +246,9 @@ fn CertificateSection(certificates: Vec<CertificateInfo>) -> Element {
                 }
             }
 
-            {
-                if let Some(msg) = sign_status() {
-                    let is_error = msg.contains("Ошибка");
-                    rsx! {
-                        div {
-                            class: if is_error {
-                                "rounded-xl border border-red-700/50 bg-red-900/20 text-red-100 px-4 py-3 text-sm shadow-inner"
-                            } else {
-                                "rounded-xl border border-blue-700/50 bg-blue-900/20 text-blue-100 px-4 py-3 text-sm shadow-inner"
-                            },
-                            if is_error {
-                                span { class: "font-semibold", "❌ " }
-                            } else {
-                                span { class: "font-semibold", "✅ " }
-                            }
-                            "{msg}"
-                        }
-                    }
-                } else {
-                    rsx! { }
+            if let Some(msg) = sign_status() {
+                div { class: "rounded-xl border border-blue-700/50 bg-blue-900/20 text-blue-100 px-4 py-3 text-sm shadow-inner",
+                    "{msg}"
                 }
             }
 

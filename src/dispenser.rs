@@ -8,6 +8,7 @@ use serde::Serialize;
 use std::io::Write;
 use std::sync::Mutex;
 use once_cell::sync::Lazy;
+use anyhow::{Result as AnyhowResult, Context}; // ✅ Добавлено
 
 // --- Потокобезопасное хранилище задач ---
 static TASKS: Lazy<Mutex<Vec<TaskInfo>>> = Lazy::new(|| Mutex::new(Vec::new()));
@@ -181,12 +182,10 @@ pub struct TaskStatusResponse {
     pub download_url: Option<String>,
 }
 
-// Конфигурация импортирована в начале файла
-
 // --- Вспомогательные функции ---
-async fn send_with_retry<F, T>(mut action: F) -> Result<T, String>
+async fn send_with_retry<F, T>(mut action: F) -> AnyhowResult<T>
 where
-    F: FnMut() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, String>> + Send>>,
+    F: FnMut() -> std::pin::Pin<Box<dyn std::future::Future<Output = AnyhowResult<T>> + Send>>,
     T: Send,
 {
     let mut attempts = 0;
@@ -210,8 +209,10 @@ where
 }
 
 // --- Основная функция: запрос выгрузки ---
-pub async fn fetch_violation_tasks() -> Result<Vec<String>, String> {
-    let token = signing::load_auth_token().map_err(|e| format!("Не авторизован: {}", e))?;
+pub async fn fetch_violation_tasks() -> AnyhowResult<Vec<String>> {
+    let token = signing::load_auth_token()
+        .map_err(|e| anyhow::anyhow!("Не авторизован: {}", e))
+        .context("Не удалось загрузить токен")?;
 
     let today = Local::now().date_naive();
     let current_week_start = today - Duration::days(today.weekday().num_days_from_monday().into());
@@ -230,12 +231,12 @@ pub async fn fetch_violation_tasks() -> Result<Vec<String>, String> {
     })
     .to_string();
 
-    // Создаём HTTP клиент с тайм-аутами
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(config::Config::HTTP_TIMEOUT_SECS))
         .connect_timeout(std::time::Duration::from_secs(config::Config::HTTP_CONNECT_TIMEOUT_SECS))
         .build()
-        .map_err(|e| format!("Не удалось создать HTTP клиент: {}", e))?;
+        .context("Не удалось создать HTTP клиент")?;
+
     let mut results = Vec::new();
     let mut new_tasks = Vec::new();
 
@@ -244,14 +245,14 @@ pub async fn fetch_violation_tasks() -> Result<Vec<String>, String> {
             name: "VIOLATIONS".to_string(),
             data_start_date: data_start_date.clone(),
             data_end_date: data_end_date.clone(),
-            format: "CSV".to_string(),
-            periodicity: "SINGLE".to_string(),
+            format: config::Config::EXPORT_FORMAT.to_string(),
+            periodicity: config::Config::PERIODICITY.to_string(),
             params: params_json.clone(),
             product_group_code: code,
         };
 
         let request_json = serde_json::to_string(&body)
-            .map_err(|e| format!("Не удалось сериализовать тело запроса: {}", e))?;
+            .context("Не удалось сериализовать тело запроса")?;
 
         debug_log(&format!(
             "📤 POST /dispenser/tasks (pg={})\n   Тело: {}",
@@ -273,18 +274,18 @@ pub async fn fetch_violation_tasks() -> Result<Vec<String>, String> {
                     .json(&body)
                     .send()
                     .await
-                    .map_err(|e| format!("Ошибка запроса: {}", e))?;
+                    .context("Ошибка запроса")?;
 
                 let status = response.status();
                 let response_text = response
                     .text()
                     .await
-                    .map_err(|e| format!("Не удалось прочитать ответ: {}", e))?;
+                    .context("Не удалось прочитать тело ответа")?;
 
                 if status.is_success() {
                     Ok((status, response_text))
                 } else {
-                    Err(format!("Ошибка {}: {}", status, response_text))
+                    Err(anyhow::anyhow!("Ошибка {}: {}", status, response_text))
                 }
             })
         })
@@ -315,7 +316,7 @@ pub async fn fetch_violation_tasks() -> Result<Vec<String>, String> {
                             is_completed: false,
                             error: None,
                         };
-                        
+
                         results.push(format!(
                             "✅ Запрос: {} (id: {})",
                             task_info.display_name(),
@@ -360,8 +361,10 @@ pub async fn fetch_violation_tasks() -> Result<Vec<String>, String> {
 pub async fn check_task_status(
     task_id: &str,
     product_code: i32,
-) -> Result<TaskStatusResponse, String> {
-    let token = signing::load_auth_token().map_err(|e| format!("Не авторизован: {}", e))?;
+) -> AnyhowResult<TaskStatusResponse> {
+    let token = signing::load_auth_token()
+        .map_err(|e| anyhow::anyhow!("Не авторизован: {}", e))
+        .context("Не удалось загрузить токен")?;
 
     let url = format!(
         "{}/dispenser/tasks/{}?pg={}",
@@ -377,32 +380,31 @@ pub async fn check_task_status(
         let url = url.clone();
         let token = token.clone();
         Box::pin(async move {
-            // Создаём клиент с тайм-аутами для каждого запроса
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(config::Config::HTTP_TIMEOUT_SECS))
                 .connect_timeout(std::time::Duration::from_secs(config::Config::HTTP_CONNECT_TIMEOUT_SECS))
                 .build()
-                .map_err(|e| format!("Не удалось создать HTTP клиент: {}", e))?;
-            
+                .context("Не удалось создать HTTP клиент")?;
+
             let response = client
                 .get(&url)
                 .bearer_auth(&token)
                 .send()
                 .await
-                .map_err(|e| format!("Ошибка сети: {}", e))?;
+                .context("Ошибка сети")?;
 
             let status = response.status();
             let response_text = response
                 .text()
                 .await
-                .map_err(|e| format!("Не удалось прочитать ответ: {}", e))?;
+                .context("Не удалось прочитать тело ответа")?;
 
             if status.is_success() {
                 let task_status: TaskStatusResponse = serde_json::from_str(&response_text)
-                    .map_err(|e| format!("Ошибка парсинга JSON: {}", e))?;
+                    .context("Ошибка парсинга JSON")?;
                 Ok(task_status)
             } else {
-                Err(format!("Ошибка {}: {}", status, response_text))
+                Err(anyhow::anyhow!("Ошибка {}: {}", status, response_text))
             }
         })
     })
@@ -411,15 +413,13 @@ pub async fn check_task_status(
 
 // --- Проверка всех задач ---
 pub async fn check_all_tasks() -> Vec<TaskStatusForUI> {
-    // Клонируем список задач, чтобы освободить Mutex перед await
     let tasks = {
         let tasks_guard = TASKS.lock().unwrap();
         tasks_guard.clone()
     };
-    
+
     let mut results = Vec::new();
 
-    // Теперь выполняем сетевые запросы без блокировки Mutex
     for task in tasks {
         let status_for_ui = match check_task_status(&task.id, task.product_group_code).await {
             Ok(status) => TaskStatusForUI {
@@ -436,7 +436,7 @@ pub async fn check_all_tasks() -> Vec<TaskStatusForUI> {
                 status: "ERROR".to_string(),
                 create_date: "—".to_string(),
                 is_completed: false,
-                error: Some(e),
+                error: Some(e.to_string()),
             },
         };
         results.push(status_for_ui);
