@@ -56,6 +56,12 @@ pub enum AppError {
     #[error("Токен не найден")]
     TokenNotFound,
 
+    #[error("Ошибка шифрования токена")]
+    EncryptionError,
+
+    #[error("Ошибка дешифрования токена")]
+    DecryptionError,
+
     #[error("Ошибка времени: {0}")]
     Time(#[from] chrono::ParseError),
 }

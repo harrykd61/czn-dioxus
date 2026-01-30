@@ -64,7 +64,7 @@ pub async fn sign_file_with_certificate(cert: &crate::certificate::CertificateIn
         return Err(AppError::InvalidPath { path: cryptcp_path.into() }.into());
     }
 
-    let thumb = cert.thumbprint.replace(":", "").replace(" ", "").to_uppercase();
+    let thumb = cert.thumbprint.to_clean_string();
 
     let mut cmd = Command::new(&cryptcp_path);
     cmd.arg("-sign").arg("-uMy").arg("-yes");
@@ -147,8 +147,7 @@ async fn send_signature_confirmation(uuid: String, clean_signature: &str) -> Any
         spawn(async move {
             if let Err(e) = dispenser::fetch_violation_tasks().await {
                 eprintln!("❌ Ошибка выгрузки нарушений: {}", e);
-                // ✅ .root_cause() работает, потому что e: anyhow::Error
-                eprintln!("💡 Подробности: {:?}", e.root_cause());
+                eprintln!("💡 Подробности: {:?}", e);
             }
         });
 

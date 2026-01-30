@@ -1,36 +1,50 @@
-// src/dispenser.rs
+//! Модуль для управления задачами выгрузки нарушений
+//!
+//! Этот модуль отвечает за создание, отслеживание и управление задачами
+//! по выгрузке данных о нарушениях из системы Честного ЗНАКа.
 
 use crate::signing;
 use crate::config;
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use reqwest;
-use serde::Serialize;
-use std::sync::Mutex;
-use once_cell::sync::Lazy;
-use anyhow::{Result as AnyhowResult, Context}; // ✅ Добавлено
+use serde::{Serialize, Deserialize};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use thiserror::Error;
 use crate::logging::info;
 
-// --- Потокобезопасное хранилище задач ---
-static TASKS: Lazy<Mutex<Vec<TaskInfo>>> = Lazy::new(|| Mutex::new(Vec::new()));
+// --- Типизированные идентификаторы ---
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TaskId(String);
 
-// --- Логирование через новый логгер ---
-fn debug_log(msg: &str) {
-    info("dispenser", msg);
+impl TaskId {
+    pub fn new(id: String) -> Self {
+        TaskId(id)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
-#[derive(Clone, Debug)]
-pub struct TaskStatusForUI {
-    pub id: String,
-    pub product_group_code: i32,
-    pub status: String,
-    pub create_date: String,
-    pub is_completed: bool,
-    pub error: Option<String>,
-}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ProductGroupCode(i32);
 
-impl TaskStatusForUI {
+impl ProductGroupCode {
+    pub fn new(code: i32) -> Option<Self> {
+        if (1..=51).contains(&code) {
+            Some(ProductGroupCode(code))
+        } else {
+            None
+        }
+    }
+
+    pub fn value(&self) -> i32 {
+        self.0
+    }
+
     pub fn display_name(&self) -> &'static str {
-        match self.product_group_code {
+        match self.0 {
             1 => "Одежда и бельё",
             2 => "Обувь",
             3 => "Табачная продукция",
@@ -79,6 +93,84 @@ impl TaskStatusForUI {
     }
 }
 
+// --- Состояния задачи ---
+#[derive(Debug, Clone, PartialEq)]
+pub enum TaskStatus {
+    Pending,
+    Processing,
+    Completed,
+    Error(String),
+}
+
+impl From<&str> for TaskStatus {
+    fn from(status: &str) -> Self {
+        match status {
+            "COMPLETED" => TaskStatus::Completed,
+            "PROCESSING" | "PENDING" => TaskStatus::Processing,
+            _ => TaskStatus::Error(status.to_string()),
+        }
+    }
+}
+
+impl ToString for TaskStatus {
+    fn to_string(&self) -> String {
+        match self {
+            TaskStatus::Pending => "PENDING".to_string(),
+            TaskStatus::Processing => "PROCESSING".to_string(),
+            TaskStatus::Completed => "COMPLETED".to_string(),
+            TaskStatus::Error(_) => "ERROR".to_string(),
+        }
+    }
+}
+
+// --- Ошибки модуля ---
+#[derive(Error, Debug)]
+pub enum DispenserError {
+    #[error("Network error: {0}")]
+    Network(#[from] reqwest::Error),
+
+    #[error("Authentication failed")]
+    AuthenticationFailed,
+
+    #[error("Task not found: {task_id}")]
+    TaskNotFound { task_id: String },
+
+    #[error("Invalid task status: {status}")]
+    InvalidTaskStatus { status: String },
+
+    #[error("Configuration error: {0}")]
+    Config(String),
+
+    #[error("Serialization error: {0}")]
+    Serialization(String),
+}
+
+// --- Доменные структуры ---
+#[derive(Clone, Debug)]
+pub struct Task {
+    pub id: TaskId,
+    pub product_group_code: ProductGroupCode,
+    pub status: TaskStatus,
+    pub created_at: NaiveDate,
+    pub download_url: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TaskStatusForUI {
+    pub id: String,
+    pub product_group_code: i32,
+    pub status: String,
+    pub create_date: String,
+    pub is_completed: bool,
+    pub error: Option<String>,
+}
+
+impl TaskStatusForUI {
+    pub fn display_name(&self) -> &'static str {
+        ProductGroupCode::new(self.product_group_code).map(|c| c.display_name()).unwrap_or("Неизвестно")
+    }
+}
+
 // --- Запрос на выгрузку ---
 #[derive(Serialize, Clone)]
 struct TaskRequest {
@@ -99,7 +191,7 @@ struct TaskRequest {
 }
 
 // --- Ответ на создание задачи ---
-#[derive(serde::Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug)]
 pub struct TaskResponse {
     #[serde(rename = "id")]
     pub id: String,
@@ -123,19 +215,8 @@ pub struct TaskResponse {
     pub timeout_secs: i32,
 }
 
-// --- Хранение задачи ---
-#[derive(Clone, Debug)]
-pub struct TaskInfo {
-    pub id: String,
-    pub product_group_code: i32,
-    pub data_start_date: String,
-    pub data_end_date: String,
-    pub status: String,
-    pub create_date: NaiveDate,
-}
-
 // --- Ответ на GET /tasks/{id} ---
-#[derive(serde::Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug)]
 pub struct ProductGroup {
     #[serde(rename = "id")]
     pub id: String,
@@ -143,7 +224,7 @@ pub struct ProductGroup {
     pub name: String,
 }
 
-#[derive(serde::Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug)]
 pub struct TaskStatusResponse {
     #[serde(rename = "id")]
     pub id: String,
@@ -167,26 +248,71 @@ pub struct TaskStatusResponse {
     pub download_url: Option<String>,
 }
 
-// --- Вспомогательные функции ---
-async fn send_with_retry<F, T>(mut action: F) -> AnyhowResult<T>
+// --- Менеджер задач ---
+pub struct TaskManager {
+    tasks: Arc<RwLock<Vec<Task>>>,
+}
+
+impl TaskManager {
+    pub fn new() -> Self {
+        Self {
+            tasks: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+
+    pub async fn add_task(&self, task: Task) {
+        let mut tasks = self.tasks.write().await;
+        tasks.push(task);
+    }
+
+    pub async fn get_all_tasks(&self) -> Vec<Task> {
+        let tasks = self.tasks.read().await;
+        tasks.clone()
+    }
+
+    pub async fn cleanup_old_tasks(&self) {
+        let mut tasks = self.tasks.write().await;
+        let now = Local::now().date_naive();
+        tasks.retain(|t| (now - t.created_at).num_days() < 7);
+    }
+}
+
+// --- Политика повторных попыток ---
+pub struct RetryPolicy {
+    pub max_attempts: u32,
+    pub initial_delay: std::time::Duration,
+    pub backoff_multiplier: f64,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            initial_delay: std::time::Duration::from_secs(1),
+            backoff_multiplier: 2.0,
+        }
+    }
+}
+
+async fn send_with_retry<F, T>(action: F, policy: RetryPolicy) -> Result<T, DispenserError>
 where
-    F: FnMut() -> std::pin::Pin<Box<dyn std::future::Future<Output = AnyhowResult<T>> + Send>>,
+    F: Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, DispenserError>> + Send>>,
     T: Send,
 {
     let mut attempts = 0;
-    let mut delay = 1;
+    let mut delay = policy.initial_delay;
 
     loop {
         match action().await {
             Ok(res) => return Ok(res),
-            Err(e) if attempts < 3 => {
+            Err(e) if attempts < policy.max_attempts => {
                 attempts += 1;
-                debug_log(&format!(
-                    "🔁 Повтор запроса через {} сек (ошибка: {})",
-                    delay, e
+                info("dispenser", &format!(
+                    "🔁 Повтор запроса через {:?} сек (ошибка: {}), попытка {}/{}",
+                    delay, e, attempts, policy.max_attempts
                 ));
-                tokio::time::sleep(tokio::time::Duration::from_secs(delay)).await;
-                delay *= 2;
+                tokio::time::sleep(delay).await;
+                delay = std::time::Duration::from_secs((delay.as_secs_f64() * policy.backoff_multiplier) as u64);
             }
             Err(e) => return Err(e),
         }
@@ -194,12 +320,11 @@ where
 }
 
 // --- Основная функция: запрос выгрузки ---
-pub async fn fetch_violation_tasks() -> AnyhowResult<Vec<String>> {
+pub async fn fetch_violation_tasks() -> Result<Vec<String>, DispenserError> {
     info("dispenser", "Начало запроса выгрузки нарушений");
-    
+
     let token = signing::load_auth_token()
-        .map_err(|e| anyhow::anyhow!("Не авторизован: {}", e))
-        .context("Не удалось загрузить токен")?;
+        .map_err(|_| DispenserError::AuthenticationFailed)?;
 
     let today = Local::now().date_naive();
     let current_week_start = today - Duration::days(today.weekday().num_days_from_monday().into());
@@ -210,7 +335,7 @@ pub async fn fetch_violation_tasks() -> AnyhowResult<Vec<String>> {
     let data_end_date = last_week_end.format("%Y-%m-%d").to_string();
     let period = format!("{}—{}", data_start_date, data_end_date);
 
-    debug_log(&format!("📆 Запрос данных за период: {}", period));
+    info("dispenser", &format!("📆 Запрос данных за период: {}", period));
 
     let params_json = serde_json::json!({
         "violationCategory": config::Config::VIOLATION_CATEGORY,
@@ -222,7 +347,7 @@ pub async fn fetch_violation_tasks() -> AnyhowResult<Vec<String>> {
         .timeout(std::time::Duration::from_secs(config::Config::HTTP_TIMEOUT_SECS))
         .connect_timeout(std::time::Duration::from_secs(config::Config::HTTP_CONNECT_TIMEOUT_SECS))
         .build()
-        .context("Не удалось создать HTTP клиент")?;
+        .map_err(|e| DispenserError::Config(format!("Failed to build HTTP client: {}", e)))?;
 
     let mut results = Vec::new();
     let mut new_tasks = Vec::new();
@@ -239,9 +364,9 @@ pub async fn fetch_violation_tasks() -> AnyhowResult<Vec<String>> {
         };
 
         let request_json = serde_json::to_string(&body)
-            .context("Не удалось сериализовать тело запроса")?;
+            .map_err(|e| DispenserError::Serialization(format!("Failed to serialize request: {}", e)))?;
 
-        debug_log(&format!(
+        info("dispenser", &format!(
             "📤 POST /dispenser/tasks (pg={})\n   Тело: {}",
             code, request_json
         ));
@@ -249,38 +374,39 @@ pub async fn fetch_violation_tasks() -> AnyhowResult<Vec<String>> {
         let token_clone = token.clone();
         let client_clone = client.clone();
 
-        let response_result = send_with_retry(move || {
-            let client = client_clone.clone();
-            let body = body.clone();
-            let token = token_clone.clone();
-            Box::pin(async move {
-                let url = format!("{}/dispenser/tasks", config::Config::API_BASE_URL);
-                let response = client
-                    .post(&url)
-                    .bearer_auth(&token)
-                    .json(&body)
-                    .send()
-                    .await
-                    .context("Ошибка запроса")?;
+        let response_result = send_with_retry(
+            move || {
+                let client = client_clone.clone();
+                let body = body.clone();
+                let token = token_clone.clone();
+                Box::pin(async move {
+                    let url = format!("{}/dispenser/tasks", config::Config::API_BASE_URL);
+                    let response = client
+                        .post(&url)
+                        .bearer_auth(&token)
+                        .json(&body)
+                        .send()
+                        .await?;
 
-                let status = response.status();
-                let response_text = response
-                    .text()
-                    .await
-                    .context("Не удалось прочитать тело ответа")?;
+                    let status = response.status();
+                    let response_text = response
+                        .text()
+                        .await?;
 
-                if status.is_success() {
-                    Ok((status, response_text))
-                } else {
-                    Err(anyhow::anyhow!("Ошибка {}: {}", status, response_text))
-                }
-            })
-        })
+                    if status.is_success() {
+                        Ok((status, response_text))
+                    } else {
+                        Err(DispenserError::Config(format!("HTTP error: {}", status)))
+                    }
+                })
+            },
+            RetryPolicy::default()
+        )
         .await;
 
         match response_result {
             Ok((status, response_text)) => {
-                debug_log(&format!(
+                info("dispenser", &format!(
                     "📥 Успешный ответ (pg={}): [{}] {}",
                     code, status, response_text
                 ));
@@ -290,7 +416,7 @@ pub async fn fetch_violation_tasks() -> AnyhowResult<Vec<String>> {
                         let create_date = NaiveDate::parse_from_str(&task.create_date, "%Y-%m-%d")
                             .unwrap_or_else(|_| Local::now().date_naive());
 
-                        debug_log(&format!(
+                        info("dispenser", &format!(
                             "✅ Задача создана: id={}, pg={}, статус={}",
                             task.id, task.product_group_code, task.current_status
                         ));
@@ -310,23 +436,25 @@ pub async fn fetch_violation_tasks() -> AnyhowResult<Vec<String>> {
                             task.id
                         ));
 
-                        new_tasks.push(TaskInfo {
-                            id: task.id,
-                            product_group_code: task.product_group_code,
-                            data_start_date: task.data_start_date,
-                            data_end_date: task.data_end_date,
-                            status: task.current_status,
-                            create_date,
+                        let product_group_code = ProductGroupCode::new(task.product_group_code)
+                            .ok_or_else(|| DispenserError::Config(format!("Invalid product group code: {}", task.product_group_code)))?;
+
+                        new_tasks.push(Task {
+                            id: TaskId::new(task.id),
+                            product_group_code,
+                            status: TaskStatus::from(task.current_status.as_str()),
+                            created_at: create_date,
+                            download_url: None,
                         });
                     }
                     Err(e) => {
-                        debug_log(&format!("❌ Ошибка парсинга JSON: {}", e));
+                        info("dispenser", &format!("❌ Ошибка парсинга JSON: {}", e));
                         results.push(format!("❌ Ошибка ответа: {}", response_text));
                     }
                 }
             }
             Err(e) => {
-                debug_log(&format!("❌ Запрос не удался после 3 попыток: {}", e));
+                info("dispenser", &format!("❌ Запрос не удался после 3 попыток: {}", e));
                 results.push(format!(
                     "❌ Не удалось создать задачу для pg={}: {}",
                     code, e
@@ -336,8 +464,8 @@ pub async fn fetch_violation_tasks() -> AnyhowResult<Vec<String>> {
     }
 
     {
-        let mut tasks = TASKS.lock().unwrap();
-        tasks.retain(|t| (Local::now().date_naive() - t.create_date).num_days() < 7);
+        let mut tasks = TASKS.write().await;
+        tasks.retain(|t| (Local::now().date_naive() - t.created_at).num_days() < 7);
         tasks.extend(new_tasks);
     }
 
@@ -348,55 +476,55 @@ pub async fn fetch_violation_tasks() -> AnyhowResult<Vec<String>> {
 pub async fn check_task_status(
     task_id: &str,
     product_code: i32,
-) -> AnyhowResult<TaskStatusResponse> {
+) -> Result<TaskStatusResponse, DispenserError> {
     info("dispenser", &format!("Проверка статуса задачи: id={}, pg={}", task_id, product_code));
-    
+
     let token = signing::load_auth_token()
-        .map_err(|e| anyhow::anyhow!("Не авторизован: {}", e))
-        .context("Не удалось загрузить токен")?;
+        .map_err(|_| DispenserError::AuthenticationFailed)?;
 
     let url = format!(
         "{}/dispenser/tasks/{}?pg={}",
         config::Config::API_BASE_URL, task_id, product_code
     );
 
-    debug_log(&format!(
+    info("dispenser", &format!(
         "🔍 Проверка статуса: id={}, pg={}",
         task_id, product_code
     ));
 
-    send_with_retry(move || {
-        let url = url.clone();
-        let token = token.clone();
-        Box::pin(async move {
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(config::Config::HTTP_TIMEOUT_SECS))
-                .connect_timeout(std::time::Duration::from_secs(config::Config::HTTP_CONNECT_TIMEOUT_SECS))
-                .build()
-                .context("Не удалось создать HTTP клиент")?;
+    send_with_retry(
+        move || {
+            let url = url.clone();
+            let token = token.clone();
+            Box::pin(async move {
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(config::Config::HTTP_TIMEOUT_SECS))
+                    .connect_timeout(std::time::Duration::from_secs(config::Config::HTTP_CONNECT_TIMEOUT_SECS))
+                    .build()
+                    .map_err(|e| DispenserError::Config(format!("Failed to build HTTP client: {}", e)))?;
 
-            let response = client
-                .get(&url)
-                .bearer_auth(&token)
-                .send()
-                .await
-                .context("Ошибка сети")?;
+                let response = client
+                    .get(&url)
+                    .bearer_auth(&token)
+                    .send()
+                    .await?;
 
-            let status = response.status();
-            let response_text = response
-                .text()
-                .await
-                .context("Не удалось прочитать тело ответа")?;
+                let status = response.status();
+                let response_text = response
+                    .text()
+                    .await?;
 
-            if status.is_success() {
-                let task_status: TaskStatusResponse = serde_json::from_str(&response_text)
-                    .context("Ошибка парсинга JSON")?;
-                Ok(task_status)
-            } else {
-                Err(anyhow::anyhow!("Ошибка {}: {}", status, response_text))
-            }
-        })
-    })
+                if status.is_success() {
+                    let task_status: TaskStatusResponse = serde_json::from_str(&response_text)
+                        .map_err(|e| DispenserError::Serialization(format!("Failed to parse JSON: {}", e)))?;
+                    Ok(task_status)
+                } else {
+                    Err(DispenserError::Config(format!("HTTP error: {}", status)))
+                }
+            })
+        },
+        RetryPolicy::default()
+    )
     .await
 }
 
@@ -405,14 +533,14 @@ pub async fn check_all_tasks() -> Vec<TaskStatusForUI> {
     info("dispenser", "Начало проверки статуса всех задач");
 
     let tasks = {
-        let tasks_guard = TASKS.lock().unwrap();
+        let tasks_guard = TASKS.read().await;
         tasks_guard.clone()
     };
 
     let mut results = Vec::new();
 
     for task in tasks {
-        let status_for_ui = match check_task_status(&task.id, task.product_group_code).await {
+        let status_for_ui = match check_task_status(task.id.as_str(), task.product_group_code.value()).await {
             Ok(status) => TaskStatusForUI {
                 id: status.id.clone(),
                 product_group_code: status.product_group_code,
@@ -422,8 +550,8 @@ pub async fn check_all_tasks() -> Vec<TaskStatusForUI> {
                 error: None,
             },
             Err(e) => TaskStatusForUI {
-                id: task.id.clone(),
-                product_group_code: task.product_group_code,
+                id: task.id.as_str().to_string(),
+                product_group_code: task.product_group_code.value(),
                 status: "ERROR".to_string(),
                 create_date: "—".to_string(),
                 is_completed: false,
@@ -437,11 +565,11 @@ pub async fn check_all_tasks() -> Vec<TaskStatusForUI> {
 }
 
 // --- Имитация скачивания файлов выгрузки ---
-pub async fn simulate_download_all_completed_tasks() -> AnyhowResult<bool> {
+pub async fn simulate_download_all_completed_tasks() -> Result<bool, DispenserError> {
     info("dispenser", "Начало имитации скачивания файлов для завершенных задач");
 
     let tasks = {
-        let tasks_guard = TASKS.lock().unwrap();
+        let tasks_guard = TASKS.read().await;
         tasks_guard.clone()
     };
 
@@ -450,34 +578,27 @@ pub async fn simulate_download_all_completed_tasks() -> AnyhowResult<bool> {
 
     for task in tasks {
         // Проверяем статус задачи
-        match check_task_status(&task.id, task.product_group_code).await {
+        match check_task_status(task.id.as_str(), task.product_group_code.value()).await {
             Ok(status) => {
                 if status.current_status == "COMPLETED" {
                     // Имитация скачивания файла
                     info("dispenser", &format!("Начало имитации скачивания для задачи: {} (категория: {})",
-                        task.id,
-                        TaskStatusForUI {
-                            id: "".to_string(),
-                            product_group_code: task.product_group_code,
-                            status: "".to_string(),
-                            create_date: "".to_string(),
-                            is_completed: false,
-                            error: None
-                        }.display_name()
+                        task.id.as_str(),
+                        task.product_group_code.display_name()
                     ));
 
                     // Имитация процесса скачивания
                     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await; // Имитация задержки
 
                     // Имитация сохранения файла
-                    let filename = format!("violation_report_{}_{}.csv", task.product_group_code, task.id);
+                    let filename = format!("violation_report_{}_{}.csv", task.product_group_code.value(), task.id.as_str());
                     info("dispenser", &format!("Файл успешно 'скачан': {}", filename));
 
                     completed_tasks_count += 1;
                 }
             },
             Err(e) => {
-                info("dispenser", &format!("Ошибка проверки статуса задачи {}: {}", task.id, e));
+                info("dispenser", &format!("Ошибка проверки статуса задачи {}: {}", task.id.as_str(), e));
             }
         }
     }
@@ -487,3 +608,8 @@ pub async fn simulate_download_all_completed_tasks() -> AnyhowResult<bool> {
     // Возвращаем true если все задачи были завершены и скачаны
     Ok(completed_tasks_count > 0 && completed_tasks_count == total_tasks_count)
 }
+
+// --- Глобальное состояние задач ---
+use once_cell::sync::Lazy;
+
+static TASKS: Lazy<Arc<RwLock<Vec<Task>>>> = Lazy::new(|| Arc::new(RwLock::new(Vec::new())));

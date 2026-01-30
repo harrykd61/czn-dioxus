@@ -3,6 +3,12 @@
 use std::path::PathBuf; // ✅ Добавлены оба
 use std::fs;
 use crate::error::AppError;
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    Aes256Gcm, Nonce, Key,
+};
+use rand::RngCore;
+use hex;
 
 pub fn base_dir() -> Result<PathBuf, AppError> {
     let home = std::env::var("HOME")
@@ -44,9 +50,49 @@ pub fn log_path() -> Result<PathBuf, AppError> {
     Ok(path)
 }
 
+// Генерация ключа шифрования на основе системных параметров (упрощенная реализация)
+fn get_encryption_key() -> Result<[u8; 32], AppError> {
+    // В реальной реализации ключ должен быть получен более безопасным способом
+    // Например, из системного хранилища или с использованием TPM
+    // Для демонстрации используем фиксированный ключ (в реальном приложении это небезопасно!)
+
+    // В целях безопасности в реальном приложении используйте:
+    // - генерацию ключа на основе пароля пользователя
+    // - системные средства хранения (Credential Manager, Keychain)
+    // - аппаратные средства (TPM)
+
+    let mut key = [0u8; 32];
+    // В реальном приложении ключ должен быть защищен надежным способом
+    // Здесь просто для демонстрации используем фиксированный ключ
+    let secret_key = b"czn-dioxus-secret-key-for-token-encryption";
+    let len = std::cmp::min(secret_key.len(), key.len());
+    key[..len].copy_from_slice(&secret_key[..len]);
+
+    Ok(key)
+}
+
 pub fn save_token(token: &str) -> Result<(), AppError> {
     let path = token_path()?;
-    fs::write(&path, token.trim().as_bytes())
+
+    // Шифрование токена
+    let key_bytes = get_encryption_key()?;
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_bytes));
+
+    // Генерация случайного nonce
+    let mut nonce_bytes = [0u8; 12];
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    // Шифрование
+    let ciphertext = cipher
+        .encrypt(nonce, token.as_bytes())
+        .map_err(|_| AppError::EncryptionError)?;
+
+    // Сохранение nonce + зашифрованные данные в HEX-формате
+    let encrypted_data = [&nonce_bytes[..], &ciphertext[..]].concat();
+    let hex_encoded = hex::encode(&encrypted_data);
+
+    fs::write(&path, hex_encoded.as_bytes())
         .map_err(|e| AppError::FileWrite { source: e, path })?;
     Ok(())
 }
@@ -57,10 +103,33 @@ pub fn load_token() -> Result<String, AppError> {
         return Err(AppError::TokenNotFound);
     }
 
-    let content = fs::read_to_string(&path)
+    let hex_content = fs::read_to_string(&path)
         .map_err(|e| AppError::FileRead { source: e, path })?;
 
-    let trimmed = content.trim().to_string();
+    let encrypted_data = hex::decode(hex_content.trim())
+        .map_err(|_| AppError::DecryptionError)?;
+
+    if encrypted_data.len() < 12 {
+        return Err(AppError::DecryptionError);
+    }
+
+    // Извлечение nonce и зашифрованных данных
+    let nonce_bytes = &encrypted_data[..12];
+    let ciphertext = &encrypted_data[12..];
+
+    // Дешифрация
+    let key_bytes = get_encryption_key()?;
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_bytes));
+    let nonce = Nonce::from_slice(nonce_bytes);
+
+    let decrypted_bytes = cipher
+        .decrypt(nonce, ciphertext.as_ref())
+        .map_err(|_| AppError::DecryptionError)?;
+
+    let token = String::from_utf8(decrypted_bytes)
+        .map_err(|_| AppError::DecryptionError)?;
+
+    let trimmed = token.trim().to_string();
     if trimmed.is_empty() {
         return Err(AppError::TokenNotFound);
     }

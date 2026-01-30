@@ -49,9 +49,16 @@ fn main() {
 fn App() -> Element {
     let certificates = use_resource(|| async move {
         crate::logging::info("main", "Начало загрузки сертификатов");
-        let certs = find_certificates();
-        crate::logging::info("main", &format!("Загружено сертификатов: {}", certs.len()));
-        certs
+        match find_certificates().await {
+            Ok(certs) => {
+                crate::logging::info("main", &format!("Загружено сертификатов: {}", certs.len()));
+                certs
+            }
+            Err(e) => {
+                crate::logging::error("main", &format!("Ошибка загрузки сертификатов: {}", e), None);
+                Vec::new()
+            }
+        }
     });
 
     let mut tasks = use_signal(|| Vec::<dispenser::TaskStatusForUI>::new());
