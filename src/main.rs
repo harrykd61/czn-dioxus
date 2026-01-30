@@ -7,6 +7,7 @@ mod dispenser;
 mod storage;
 mod error; // ✅ Есть
 mod config;
+mod logging; // ✅ Добавлено логирование
 
 use certificate::{CertificateInfo, find_certificates};
 use signing::{sign_file_with_certificate, extract_attr}; // ❌ Убран prepare_signature_message
@@ -19,7 +20,10 @@ const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
 #[cfg(feature = "desktop")]
 fn main() {
+    crate::logging::info("main", "Запуск приложения");
+    
     if let Err(e) = crate::storage::ensure_czn_dir() {
+        crate::logging::error("main", "Не удалось создать директорию приложения", Some(&e.to_string()));
         eprintln!("🚨 Критическая ошибка: не удалось создать директорию приложения");
         eprintln!("   Сообщение: {}", e);
         // ✅ .source() доступно, потому что AppError: Error
@@ -28,6 +32,8 @@ fn main() {
         }
         return;
     }
+    
+    crate::logging::info("main", "Директория приложения создана успешно");
 
     dioxus::LaunchBuilder::desktop()
         .with_cfg(dioxus::desktop::Config::default().with_menu(None))
@@ -42,11 +48,15 @@ fn main() {
 #[component]
 fn App() -> Element {
     let certificates = use_resource(|| async move {
-        find_certificates()
+        crate::logging::info("main", "Начало загрузки сертификатов");
+        let certs = find_certificates();
+        crate::logging::info("main", &format!("Загружено сертификатов: {}", certs.len()));
+        certs
     });
 
     let mut tasks = use_signal(|| Vec::<dispenser::TaskStatusForUI>::new());
     let mut loading_status = use_signal(|| false);
+    let mut all_downloads_completed = use_signal(|| false);
 
     use_future(move || async move {
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
@@ -54,7 +64,20 @@ fn App() -> Element {
         loop {
             loading_status.set(true);
             let statuses = dispenser::check_all_tasks().await;
-            tasks.set(statuses);
+            tasks.set(statuses.clone()); // Клонируем вектор, чтобы использовать его дважды
+
+            // Проверяем, все ли задачи завершены
+            let all_completed = statuses.iter().all(|task| task.is_completed);
+
+            if all_completed && !statuses.is_empty() && !all_downloads_completed() {
+                // Запускаем имитацию скачивания
+                if let Ok(download_success) = dispenser::simulate_download_all_completed_tasks().await {
+                    if download_success {
+                        all_downloads_completed.set(true);
+                    }
+                }
+            }
+
             loading_status.set(false);
 
             tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
@@ -119,9 +142,34 @@ fn App() -> Element {
                 }
             }
 
+            if all_downloads_completed() {
+                div { class: "mb-6 p-4 bg-green-900/30 border border-green-700 rounded-xl text-center",
+                    h2 { class: "text-lg font-semibold mb-2 text-green-100", "✅ Все выгрузки завершены!" }
+                    p { class: "text-green-200 mb-3", "Файлы нарушений успешно 'скачаны'" }
+                    button {
+                        class: "px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-md transition-colors",
+                        onclick: move |_| {
+                            // Сброс всех состояний для очистки экрана
+                            all_downloads_completed.set(false);
+                            // Сброс задач
+                            tasks.set(vec![]);
+                            // Перезапуск получения сертификатов для обновления интерфейса
+                            spawn(async move {
+                                // Небольшая задержка для обновления интерфейса
+                                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                            });
+                        },
+                        "Перейти к выбору сертификатов"
+                    }
+                }
+            }
+
             match certificates() {
                 Some(certs) => rsx! {
-                    CertificateSection { certificates: certs.clone() }
+                    CertificateSection {
+                        certificates: certs.clone(),
+                        all_downloads_completed: all_downloads_completed()
+                    }
                 },
                 None => rsx! {
                     div { class: "text-center py-8", "Загрузка сертификатов..." }
@@ -132,7 +180,10 @@ fn App() -> Element {
 }
 
 #[component]
-fn CertificateSection(certificates: Vec<CertificateInfo>) -> Element {
+fn CertificateSection(
+    certificates: Vec<CertificateInfo>,
+    all_downloads_completed: bool,
+) -> Element {
     let mut search_query = use_signal(|| String::new());
     let mut selected_cert = use_signal(|| Option::<CertificateInfo>::None);
     let mut sign_status = use_signal(|| Option::<String>::None);
@@ -152,6 +203,12 @@ fn CertificateSection(certificates: Vec<CertificateInfo>) -> Element {
 
     let certs = filtered_certs().into_iter().take(6).collect::<Vec<_>>();
 
+    // Если все загрузки завершены, очищаем статус подписи и строку поиска
+    if all_downloads_completed {
+        sign_status.set(None);
+        search_query.set(String::new()); // Очистка строки поиска
+    }
+
     rsx! {
         div { class: "space-y-6",
             div { class: "mb-6",
@@ -159,7 +216,9 @@ fn CertificateSection(certificates: Vec<CertificateInfo>) -> Element {
                     class: "w-full p-3 rounded bg-gray-800 text-white border border-gray-700 focus:outline-none focus:border-blue-500",
                     placeholder: "Поиск по сертификатам...",
                     value: search_query(),
-                    oninput: move |e| search_query.set(e.value()),
+                    oninput: move |e| {
+                        search_query.set(e.value());
+                    },
                 }
                 p { class: "text-sm text-gray-400 mt-2",
                     "Найдено: {filtered_certs().len()} сертификатов"
@@ -184,8 +243,22 @@ fn CertificateSection(certificates: Vec<CertificateInfo>) -> Element {
                                         sign_status.set(Some(message));
                                     }
                                     Err(error) => {
-                                        sign_status.set(Some(format!("Ошибка: {}", error)));
+                                        // Обработка ошибки с корректным форматированием текста
+                                        let error_msg = format!("Ошибка: {}", error);
+                                        // Убедимся, что строка содержит только корректные символы
+                                        let clean_error_msg = error_msg
+                                            .chars()
+                                            .filter(|c| !c.is_control() || *c == '\n' || *c == '\r' || *c == '\t')
+                                            .collect::<String>();
+
+                                        sign_status.set(Some(clean_error_msg));
                                         eprintln!("❌ Подробности: {:?}", error.root_cause());
+                                        // В случае ошибки подписи, через некоторое время очищаем статус, чтобы пользователь мог выбрать другой сертификат
+                                        spawn(async move {
+                                            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                                            // Сбрасываем выбранный сертификат, чтобы пользователь мог выбрать другой
+                                            selected_cert.set(None);
+                                        });
                                     }
                                 }
                                 loading.set(false);

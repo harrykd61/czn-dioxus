@@ -13,7 +13,8 @@ categories = ["gui", "cryptography"]
 [dependencies]
 anyhow = "1.0"
 thiserror = "2.0.17"
-dioxus = { version = "0.7.1", features = ["desktop", "router"] }
+lazy_static = "1.5.0"
+dioxus = { version = "0.7.3", features = ["desktop", "router"] }
 reqwest = { version = "0.12.25", features = ["json"] }
 tokio = { version = "1.49.0", features = ["full"] }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -35,4 +36,3 @@ default = ["desktop"]
 web = ["dioxus/web"]
 desktop = ["dioxus/desktop"]
 mobile = ["dioxus/mobile"]
-

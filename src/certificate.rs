@@ -38,6 +38,8 @@ impl fmt::Display for CertificateInfo {
 }
 
 pub fn find_certificates() -> Vec<CertificateInfo> {
+    crate::logging::info("certificate", "Начало поиска сертификатов");
+    
     let mut certificates = Vec::new();
 
     unsafe {

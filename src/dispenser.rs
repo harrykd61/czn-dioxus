@@ -5,32 +5,17 @@ use crate::config;
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use reqwest;
 use serde::Serialize;
-use std::io::Write;
 use std::sync::Mutex;
 use once_cell::sync::Lazy;
 use anyhow::{Result as AnyhowResult, Context}; // ✅ Добавлено
+use crate::logging::info;
 
 // --- Потокобезопасное хранилище задач ---
 static TASKS: Lazy<Mutex<Vec<TaskInfo>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
-// --- Логирование в файл через storage ---
+// --- Логирование через новый логгер ---
 fn debug_log(msg: &str) {
-    let msg = msg.to_string();
-    std::thread::spawn(move || {
-        let log_path = match crate::storage::log_path() {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-
-        let _ = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_path)
-            .and_then(|mut file| {
-                let timestamp = Local::now().format("[%Y-%m-%d %H:%M:%S]").to_string();
-                writeln!(file, "{} {}", timestamp, msg)
-            });
-    });
+    info("dispenser", msg);
 }
 
 #[derive(Clone, Debug)]
@@ -210,6 +195,8 @@ where
 
 // --- Основная функция: запрос выгрузки ---
 pub async fn fetch_violation_tasks() -> AnyhowResult<Vec<String>> {
+    info("dispenser", "Начало запроса выгрузки нарушений");
+    
     let token = signing::load_auth_token()
         .map_err(|e| anyhow::anyhow!("Не авторизован: {}", e))
         .context("Не удалось загрузить токен")?;
@@ -362,6 +349,8 @@ pub async fn check_task_status(
     task_id: &str,
     product_code: i32,
 ) -> AnyhowResult<TaskStatusResponse> {
+    info("dispenser", &format!("Проверка статуса задачи: id={}, pg={}", task_id, product_code));
+    
     let token = signing::load_auth_token()
         .map_err(|e| anyhow::anyhow!("Не авторизован: {}", e))
         .context("Не удалось загрузить токен")?;
@@ -413,6 +402,8 @@ pub async fn check_task_status(
 
 // --- Проверка всех задач ---
 pub async fn check_all_tasks() -> Vec<TaskStatusForUI> {
+    info("dispenser", "Начало проверки статуса всех задач");
+
     let tasks = {
         let tasks_guard = TASKS.lock().unwrap();
         tasks_guard.clone()
@@ -443,4 +434,56 @@ pub async fn check_all_tasks() -> Vec<TaskStatusForUI> {
     }
 
     results
+}
+
+// --- Имитация скачивания файлов выгрузки ---
+pub async fn simulate_download_all_completed_tasks() -> AnyhowResult<bool> {
+    info("dispenser", "Начало имитации скачивания файлов для завершенных задач");
+
+    let tasks = {
+        let tasks_guard = TASKS.lock().unwrap();
+        tasks_guard.clone()
+    };
+
+    let mut completed_tasks_count = 0;
+    let total_tasks_count = tasks.len();
+
+    for task in tasks {
+        // Проверяем статус задачи
+        match check_task_status(&task.id, task.product_group_code).await {
+            Ok(status) => {
+                if status.current_status == "COMPLETED" {
+                    // Имитация скачивания файла
+                    info("dispenser", &format!("Начало имитации скачивания для задачи: {} (категория: {})",
+                        task.id,
+                        TaskStatusForUI {
+                            id: "".to_string(),
+                            product_group_code: task.product_group_code,
+                            status: "".to_string(),
+                            create_date: "".to_string(),
+                            is_completed: false,
+                            error: None
+                        }.display_name()
+                    ));
+
+                    // Имитация процесса скачивания
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await; // Имитация задержки
+
+                    // Имитация сохранения файла
+                    let filename = format!("violation_report_{}_{}.csv", task.product_group_code, task.id);
+                    info("dispenser", &format!("Файл успешно 'скачан': {}", filename));
+
+                    completed_tasks_count += 1;
+                }
+            },
+            Err(e) => {
+                info("dispenser", &format!("Ошибка проверки статуса задачи {}: {}", task.id, e));
+            }
+        }
+    }
+
+    info("dispenser", &format!("Имитация скачивания завершена. Обработано задач: {}/{}", completed_tasks_count, total_tasks_count));
+
+    // Возвращаем true если все задачи были завершены и скачаны
+    Ok(completed_tasks_count > 0 && completed_tasks_count == total_tasks_count)
 }

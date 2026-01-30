@@ -1,96 +1,190 @@
-# CZN Dioxus - Electronic Signatures Management
+# czn-dioxus
 
-A Dioxus application for managing electronic signatures and certificates on Windows platforms.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## Features
+Приложение для управления электронными подписями в системе Честный ЗНАК. Современное, безопасное и удобное решение для работы с сертификатами и документами.
 
-- Browse and search Windows certificate store
-- View certificate details (subject, serial number, issuer)
-- Electronic signature operations
-- Modern UI with Tailwind CSS
-- Desktop application with Dioxus
+## Особенности
 
-## Installation
+- 🔐 **Безопасность**: Шифрование токенов, валидация данных, безопасная работа с файлами
+- 🚀 **Производительность**: Оптимизированная загрузка сертификатов, эффективное управление памятью
+- 🎨 **Интерфейс**: Современный дизайн на Tailwind CSS, интуитивная навигация
+- 📊 **Логирование**: Полная система логирования всех операций
+- 🧪 **Тестирование**: Комплексная система тестирования
+- ⚙️ **Конфигурация**: Гибкая система настройки
+- 🔄 **Архитектура**: Модульная, масштабируемая архитектура
 
-### Prerequisites
+## Требования
 
-- Rust (latest stable version)
-- Dioxus CLI tools
+- Rust 1.70+
+- Windows 10+ (для работы с сертификатами)
+- КриптоПро CSP
 
-### Build from source
+## Установка
 
+1. Клонируйте репозиторий:
 ```bash
 git clone https://github.com/yourusername/czn-dioxus.git
 cd czn-dioxus
+```
+
+2. Соберите проект:
+```bash
 cargo build --release
 ```
 
-### Run the application
-
+3. Запустите приложение:
 ```bash
 cargo run --release
 ```
 
-Or use Dioxus serve:
+## Использование
+
+### Основные функции
+
+1. **Загрузка сертификатов**: Автоматическое обнаружение и загрузка сертификатов из хранилища Windows
+2. **Подпись документов**: Подпись файлов с использованием выбранных сертификатов
+3. **Выгрузка нарушений**: Автоматическая выгрузка данных о нарушениях из системы Честный ЗНАК
+4. **Мониторинг статуса**: Отслеживание статуса выгрузок в реальном времени
+
+### Интерфейс
+
+Приложение предоставляет удобный веб-интерфейс с возможностью:
+- Поиска сертификатов по различным критериям
+- Фильтрации результатов
+- Просмотра детальной информации о сертификатах
+- Мониторинга статуса выгрузок
+
+## Конфигурация
+
+Конфигурация приложения находится в файле `src/config.rs`. Основные параметры:
+
+- `API_BASE_URL`: Базовый URL API Честного ЗНАКа
+- `PRODUCT_GROUP_CODES`: Коды групп товаров для выгрузки
+- `HTTP_TIMEOUT_SECS`: Таймаут HTTP-запросов
+- `EXPORT_FORMAT`: Формат выгружаемых данных
+
+## Безопасность
+
+Приложение использует следующие меры безопасности:
+
+- **Шифрование токенов**: Все токены шифруются при хранении
+- **Валидация данных**: Все входные данные проходят строгую валидацию
+- **Безопасная работа с файлами**: Проверка существования файлов и контроль прав доступа
+- **Обработка ошибок**: Централизованная система обработки ошибок
+
+## Логирование
+
+Приложение поддерживает полное логирование всех операций:
+
+- **JSON-формат**: Логи в формате JSON для машинной обработки
+- **Разные уровни**: DEBUG, INFO, WARN, ERROR
+- **Временные метки**: Автоматическое добавление временных меток
+- **Вывод**: Возможность вывода в консоль и файл
+
+Пример лога:
+```json
+{
+  "timestamp": "2024-01-15T10:30:45.123Z",
+  "level": "INFO",
+  "module": "signing",
+  "message": "Начало подписи для сертификата",
+  "details": null
+}
+```
+
+## Архитектура
+
+Проект использует модульную архитектуру с четким разделением ответственности:
+
+```
+src/
+├── main.rs          # Точка входа и UI
+├── certificate.rs   # Работа с сертификатами
+├── signing.rs       # Подпись документов
+├── dispenser.rs     # Работа с API
+├── storage.rs       # Хранение данных
+├── config.rs        # Конфигурация
+├── error.rs         # Обработка ошибок
+├── logging.rs       # Логирование
+└── utils/           # Вспомогательные функции
+```
+
+### Реактивное программирование
+
+Приложение полностью построено на реактивной модели:
+- `use_signal` для управления состоянием
+- `use_resource` для асинхронных операций
+- `use_memo` для оптимизации производительности
+
+## Тестирование
+
+Проект включает комплексную систему тестирования:
+
+- **Модульные тесты**: Тесты для всех основных функций
+- **Интеграционные тесты**: Тесты взаимодействия модулей
+- **UI тесты**: Тесты пользовательского интерфейса
+
+## Разработка
+
+### Сборка
 
 ```bash
-dx serve --platform desktop
+# Сборка в режиме разработки
+cargo build
+
+# Сборка в режиме релиза
+cargo build --release
+
+# Запуск тестов
+cargo test
+
+# Проверка кода
+cargo clippy
 ```
 
-## Usage
+### Структура проекта
 
-1. Launch the application
-2. The app will automatically load certificates from your Windows certificate store
-3. Use the search box to filter certificates
-4. Click on a certificate to view details and perform signature operations
-
-## Configuration
-
-Edit `Dioxus.toml` to customize application settings:
-
-```toml
-[application]
-[bundle]
-identifier = "com.chzn.dioxus"
-publisher = "xCompany"
-name = "CZN Dioxus Signer"
-version = "1.0.0"
+```
+czn-dioxus/
+├── src/                    # Исходный код
+│   ├── main.rs            # Точка входа
+│   ├── certificate.rs     # Работа с сертификатами
+│   ├── signing.rs         # Подпись документов
+│   ├── dispenser.rs       # Работа с API
+│   ├── storage.rs         # Хранение данных
+│   ├── config.rs          # Конфигурация
+│   ├── error.rs           # Обработка ошибок
+│   ├── logging.rs         # Логирование
+│   └── utils/             # Вспомогательные функции
+├── assets/                # Статические файлы
+│   ├── favicon.ico        # Иконка приложения
+│   ├── main.css           # Основные стили
+│   └── tailwind.css       # Tailwind CSS
+├── Cargo.toml            # Конфигурация Cargo
+├── Dioxus.toml           # Конфигурация Dioxus
+└── README.md             # Документация
 ```
 
-## Development
+## Лицензия
 
-### Automatic Tailwind
+Этот проект лицензирован по лицензии MIT. Подробнее см. в файле [LICENSE](LICENSE).
 
-The project uses automatic Tailwind CSS support in Dioxus 0.7+. Simply run:
+## Вклад в развитие
 
-```bash
-dx serve
-```
+Мы приветствуем вклад в развитие проекта! Пожалуйста, ознакомьтесь с нашими [рекомендациями по вкладу](CONTRIBUTING.md).
 
-### Manual Tailwind Setup
+## Поддержка
 
-For advanced Tailwind customization:
+Если у вас возникли вопросы или проблемы, пожалуйста, создайте [issue](https://github.com/yourusername/czn-dioxus/issues).
 
-1. Install Node.js and npm
-2. Install Tailwind CLI: `npm install -g tailwindcss`
-3. Run: `npx tailwindcss -i ./tailwind.css -o ./assets/tailwind.css --watch`
+## Список изменений
 
-## Dependencies
+Подробный список изменений доступен в файле [CHANGELOG.md](CHANGELOG.md).
 
-- Dioxus 0.7.1 (desktop + router features)
-- Windows API for certificate access
-- Chrono for date/time handling
-- RFD for file dialogs
-- Hex encoding utilities
+## Благодарности
 
-## License
-
-MIT License
-
-## Contributing
-
-Contributions are welcome! Please open issues and pull requests on GitHub.
-
-## Support
-
-For support, please contact: d_in@rambler.ru
+- [Dioxus Labs](https://dioxuslabs.com/) - за отличный фреймворк
+- [Tailwind CSS](https://tailwindcss.com/) - за потрясающие стили
+- [reqwest](https://docs.rs/reqwest/) - за удобную работу с HTTP
+- [serde](https://serde.rs/) - за отличную сериализацию

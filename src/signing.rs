@@ -8,6 +8,7 @@ use dioxus::prelude::spawn;
 use anyhow::{Result as AnyhowResult, Context}; // ✅ Добавлено: Context
 use crate::dispenser;
 use crate::error::{AppError, Result};
+use crate::logging::{info, warn, error};
 
 #[derive(Deserialize, Debug)]
 struct AuthResponse {
@@ -31,6 +32,8 @@ pub fn extract_attr(s: &str, key: &str) -> Option<String> {
 }
 
 pub async fn sign_file_with_certificate(cert: &crate::certificate::CertificateInfo) -> AnyhowResult<String> {
+    info("signing", &format!("Начало подписи для сертификата: {}", cert.subject_name));
+    
     let key_path = crate::storage::key_path().context("Не удалось получить путь к временному файлу key")?;
     let sig_path = crate::storage::sig_path().context("Не удалось получить путь к файлу подписи")?;
 
@@ -80,10 +83,19 @@ pub async fn sign_file_with_certificate(cert: &crate::certificate::CertificateIn
         .map_err(|e| AppError::Command(format!("Не удалось выполнить cryptcp: {}", e)))?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let output_str = if !stderr.is_empty() { stderr } else { stdout };
-        return Err(AppError::CryptCp { output: output_str.to_string() }.into());
+
+        // Пробуем декодировать как CP866 (обычная кодировка для русских Windows)
+        let output_str = if !output.stderr.is_empty() {
+            let (cow, _encoding_used, _had_errors) = encoding_rs::IBM866.decode(&output.stderr);
+            cow.into_owned()
+        } else if !output.stdout.is_empty() {
+            let (cow, _encoding_used, _had_errors) = encoding_rs::IBM866.decode(&output.stdout);
+            cow.into_owned()
+        } else {
+            String::from_utf8_lossy(&output.stderr).to_string()
+        };
+
+        return Err(AppError::CryptCp { output: output_str }.into());
     }
 
     let signature_raw = std::fs::read_to_string(&sig_path)
@@ -109,6 +121,8 @@ pub async fn sign_file_with_certificate(cert: &crate::certificate::CertificateIn
 }
 
 async fn send_signature_confirmation(uuid: String, clean_signature: &str) -> AnyhowResult<String> {
+    info("signing", &format!("Отправка подтверждения подписи для UUID: {}", uuid));
+    
     let client = reqwest::Client::new();
 
     let response = client
@@ -151,9 +165,14 @@ pub fn load_auth_token() -> Result<String> {
 }
 
 fn find_cryptcp_path() -> Result<String> {
+    info("signing", "Поиск cryptcp.exe");
+    
     if let Ok(path) = std::env::var("CRYPTCP_PATH") {
         if Path::new(&path).exists() {
+            info("signing", &format!("Найден cryptcp.exe по переменной окружения: {}", path));
             return Ok(path);
+        } else {
+            warn("signing", &format!("cryptcp.exe не найден по переменной окружения: {}", path), None);
         }
     }
 
@@ -164,10 +183,12 @@ fn find_cryptcp_path() -> Result<String> {
 
     for path in &paths {
         if Path::new(path).exists() {
+            info("signing", &format!("Найден cryptcp.exe: {}", path));
             return Ok(path.to_string());
         }
     }
 
+    error("signing", "cryptcp.exe не найден", Some("Проверьте установку КриптоПро CSP"));
     Err(AppError::Command("cryptcp.exe не найден".to_string()))
 }
 
