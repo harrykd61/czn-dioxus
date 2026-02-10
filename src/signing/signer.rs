@@ -1,14 +1,13 @@
-// src/signing.rs
-
 use std::process::Command;
 use std::path::Path;
 use reqwest;
 use serde::Deserialize;
 use dioxus::prelude::spawn;
-use anyhow::{Result as AnyhowResult, Context}; // ✅ Добавлено: Context
-use crate::dispenser;
-use crate::error::{AppError, Result};
+use anyhow::{Result as AnyhowResult, Context};
+use crate::api::dispenser;
+use crate::error::AppError;
 use crate::logging::{info, warn, error};
+use crate::certificates::CertificateInfo;
 
 #[derive(Deserialize, Debug)]
 struct AuthResponse {
@@ -21,23 +20,17 @@ struct SignInResponse {
     token: String,
 }
 
-pub fn prepare_signature_message(cert: &crate::certificate::CertificateInfo) -> String {
+pub fn prepare_signature_message(cert: &CertificateInfo) -> String {
     format!("Подпись файла с помощью: {}", cert.subject_name)
 }
 
-pub fn extract_attr(s: &str, key: &str) -> Option<String> {
-    s.split(',')
-        .find(|part| part.trim().starts_with(key))
-        .map(|part| part.trim()[key.len()..].to_string())
-}
-
-pub async fn sign_file_with_certificate(cert: &crate::certificate::CertificateInfo) -> AnyhowResult<String> {
+pub async fn sign_file_with_certificate(cert: &CertificateInfo) -> AnyhowResult<String> {
     info("signing", &format!("Начало подписи для сертификата: {}", cert.subject_name));
-    
-    let key_path = crate::storage::key_path().context("Не удалось получить путь к временному файлу key")?;
-    let sig_path = crate::storage::sig_path().context("Не удалось получить путь к файлу подписи")?;
 
-    let _ = crate::storage::ensure_czn_dir();
+    let key_path = crate::storage::paths::key_path().context("Не удалось получить путь к временному файлу key")?;
+    let sig_path = crate::storage::paths::sig_path().context("Не удалось получить путь к файлу подписи")?;
+
+    let _ = crate::storage::directory::ensure_czn_dir();
 
     let client = reqwest::Client::new();
 
@@ -72,7 +65,7 @@ pub async fn sign_file_with_certificate(cert: &crate::certificate::CertificateIn
     if !thumb.is_empty() {
         cmd.arg("-thumb").arg(&thumb);
     } else {
-        let cn = extract_attr(&cert.subject_name, "CN=").unwrap_or_default();
+        let cn = crate::signing::extract_attr(&cert.subject_name, "CN=").unwrap_or_default();
         cmd.arg("-dn").arg(&cn);
     }
 
@@ -122,7 +115,7 @@ pub async fn sign_file_with_certificate(cert: &crate::certificate::CertificateIn
 
 async fn send_signature_confirmation(uuid: String, clean_signature: &str) -> AnyhowResult<String> {
     info("signing", &format!("Отправка подтверждения подписи для UUID: {}", uuid));
-    
+
     let client = reqwest::Client::new();
 
     let response = client
@@ -141,7 +134,7 @@ async fn send_signature_confirmation(uuid: String, clean_signature: &str) -> Any
         let result: SignInResponse = response.json().await
             .context("JSON: не удалось распарсить ответ simpleSignIn")?;
 
-        crate::storage::save_token(&result.token)
+        crate::storage::tokens::save_token(&result.token)
             .context("Не удалось сохранить токен на диск")?;
 
         spawn(async move {
@@ -159,13 +152,13 @@ async fn send_signature_confirmation(uuid: String, clean_signature: &str) -> Any
     }
 }
 
-pub fn load_auth_token() -> Result<String> {
-    crate::storage::load_token()
+pub fn load_auth_token() -> crate::error::Result<String> {
+    crate::storage::tokens::load_token()
 }
 
-fn find_cryptcp_path() -> Result<String> {
+fn find_cryptcp_path() -> crate::error::Result<String> {
     info("signing", "Поиск cryptcp.exe");
-    
+
     if let Ok(path) = std::env::var("CRYPTCP_PATH") {
         if Path::new(&path).exists() {
             info("signing", &format!("Найден cryptcp.exe по переменной окружения: {}", path));
@@ -189,8 +182,4 @@ fn find_cryptcp_path() -> Result<String> {
 
     error("signing", "cryptcp.exe не найден", Some("Проверьте установку КриптоПро CSP"));
     Err(AppError::Command("cryptcp.exe не найден".to_string()))
-}
-
-pub fn attr_value(dn: &str, prefix: &str) -> String {
-    extract_attr(dn, prefix).unwrap_or_default()
 }

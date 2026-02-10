@@ -1,15 +1,16 @@
 // src/main.rs
 
 use dioxus::prelude::*;
-mod certificate;
+mod certificates;
 mod signing;
-mod dispenser;
+mod api;
 mod storage;
 mod error; // ✅ Есть
 mod config;
 mod logging; // ✅ Добавлено логирование
+mod utils;
 
-use certificate::{CertificateInfo, find_certificates};
+use certificates::{CertificateInfo, find_certificates};
 use signing::{sign_file_with_certificate, extract_attr}; // ❌ Убран prepare_signature_message
 //use error::AppError;
 use std::error::Error; // ✅ Нужно для .source()
@@ -21,9 +22,9 @@ const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 #[cfg(feature = "desktop")]
 fn main() {
     crate::logging::info("main", "Запуск приложения");
-    
-    if let Err(e) = crate::storage::ensure_czn_dir() {
-        crate::logging::error("main", "Не удалось создать директорию приложения", Some(&e.to_string()));
+
+    if let Err(e) = crate::storage::directory::ensure_czn_dir() {
+        crate::logging::error("main", "Не удалось создать директорию приложения", Some(&e.to_string() as &str));
         eprintln!("🚨 Критическая ошибка: не удалось создать директорию приложения");
         eprintln!("   Сообщение: {}", e);
         // ✅ .source() доступно, потому что AppError: Error
@@ -32,7 +33,7 @@ fn main() {
         }
         return;
     }
-    
+
     crate::logging::info("main", "Директория приложения создана успешно");
 
     dioxus::LaunchBuilder::desktop()
@@ -61,7 +62,7 @@ fn App() -> Element {
         }
     });
 
-    let mut tasks = use_signal(|| Vec::<dispenser::TaskStatusForUI>::new());
+    let mut tasks = use_signal(|| Vec::<api::dispenser::TaskStatusForUI>::new());
     let mut loading_status = use_signal(|| false);
     let mut all_downloads_completed = use_signal(|| false);
 
@@ -70,7 +71,7 @@ fn App() -> Element {
 
         loop {
             loading_status.set(true);
-            let statuses = dispenser::check_all_tasks().await;
+            let statuses = api::dispenser::check_all_tasks().await;
             tasks.set(statuses.clone()); // Клонируем вектор, чтобы использовать его дважды
 
             // Проверяем, все ли задачи завершены
@@ -78,7 +79,7 @@ fn App() -> Element {
 
             if all_completed && !statuses.is_empty() && !all_downloads_completed() {
                 // Запускаем имитацию скачивания
-                if let Ok(download_success) = dispenser::simulate_download_all_completed_tasks().await {
+                if let Ok(download_success) = api::dispenser::simulate_download_all_completed_tasks().await {
                     if download_success {
                         all_downloads_completed.set(true);
                     }
@@ -259,7 +260,7 @@ fn CertificateSection(
                                             .collect::<String>();
 
                                         sign_status.set(Some(clean_error_msg));
-                                        eprintln!("❌ Подробности: {:?}", error.root_cause());
+                                        eprintln!("❌ Подробности: {:?}", error.root_cause() as &dyn std::error::Error);
                                         // В случае ошибки подписи, через некоторое время очищаем статус, чтобы пользователь мог выбрать другой сертификат
                                         spawn(async move {
                                             tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;

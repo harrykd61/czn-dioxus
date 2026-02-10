@@ -217,14 +217,6 @@ pub struct TaskResponse {
 
 // --- Ответ на GET /tasks/{id} ---
 #[derive(Deserialize, Clone, Debug)]
-pub struct ProductGroup {
-    #[serde(rename = "id")]
-    pub id: String,
-    #[serde(rename = "name")]
-    pub name: String,
-}
-
-#[derive(Deserialize, Clone, Debug)]
 pub struct TaskStatusResponse {
     #[serde(rename = "id")]
     pub id: String,
@@ -246,6 +238,15 @@ pub struct TaskStatusResponse {
     pub timeout_secs: i32,
     #[serde(rename = "downloadUrl")]
     pub download_url: Option<String>,
+}
+
+// --- Ответ на получение списка задач ---
+#[derive(Deserialize, Clone, Debug)]
+pub struct ProductGroup {
+    #[serde(rename = "id")]
+    pub id: String,
+    #[serde(rename = "name")]
+    pub name: String,
 }
 
 // --- Менеджер задач ---

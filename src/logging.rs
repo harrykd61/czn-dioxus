@@ -122,7 +122,7 @@ impl Logger {
 // Глобальный логгер
 lazy_static::lazy_static! {
     static ref LOGGER: Logger = {
-        let log_path = crate::storage::log_path().unwrap_or_else(|_| {
+        let log_path = crate::storage::paths::log_path().unwrap_or_else(|_| {
             std::env::temp_dir().join("czn-dioxus.log")
         });
         
